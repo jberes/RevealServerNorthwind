@@ -2,14 +2,14 @@
   "Datasources": [
     {
       "Id": "NorthwindSql",
-      "Provider": "SQLServer",
+      "Provider": "SQLITE",
       "Databases": [
         {
-          "Name": "NorthwindCloud",
+          "Name": "northwind",
           "DiscoveryMode": "Restricted",
           "Tables": [
             {
-              "Name": "dbo.All Invoices",
+              "Name": "All Invoices",
               "Fields": [
                 {
                   "Name": "ShipName"
@@ -30,25 +30,25 @@
                   "Name": "ShipCountry"
                 },
                 {
-                  "Name": "CustomerID"
+                  "Name": "CustomerID:1"
                 },
                 {
                   "Name": "CustomerName"
                 },
                 {
-                  "Name": "Address"
+                  "Name": "Address:1"
                 },
                 {
-                  "Name": "City"
+                  "Name": "City:1"
                 },
                 {
-                  "Name": "Region"
+                  "Name": "Region:1"
                 },
                 {
-                  "Name": "PostalCode"
+                  "Name": "PostalCode:1"
                 },
                 {
-                  "Name": "Country"
+                  "Name": "Country:1"
                 },
                 {
                   "Name": "Salesperson"
@@ -69,13 +69,13 @@
                   "Name": "ShipperName"
                 },
                 {
-                  "Name": "ProductID"
+                  "Name": "ProductID:1"
                 },
                 {
                   "Name": "ProductName"
                 },
                 {
-                  "Name": "UnitPrice"
+                  "Name": "UnitPrice:1"
                 },
                 {
                   "Name": "Quantity"
@@ -92,7 +92,7 @@
               ]
             },
             {
-              "Name": "dbo.All Orders",
+              "Name": "All Orders",
               "Fields": [
                 {
                   "Name": "OrderID"
@@ -157,7 +157,7 @@
               ]
             },
             {
-              "Name": "dbo.EmployeeDetailsExtended",
+              "Name": "EmployeeDetailsExtended",
               "Fields": [
                 {
                   "Name": "EmployeeID"

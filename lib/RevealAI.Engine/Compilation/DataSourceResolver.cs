@@ -52,6 +52,11 @@ public sealed class DataSourceResolver
                 new SnowflakeDataSource { Host = conn.Host, Database = conn.Database },
                 ds => new SnowflakeDataSourceItem(title, (SnowflakeDataSource)ds), conn, dataset),
 
+            // The Reveal DOM has no dedicated SQLite type, so build a SQL-based table
+            // item and override the provider to SQLITE — Reveal's SQLite connector then
+            // resolves it server-side (the file path is injected by DataSourceProvider).
+            ConnectionType.Sqlite => Sqlite(conn, title, dataset),
+
             ConnectionType.Excel => Rest(conn, title, dataset, FileKind.Excel),
             ConnectionType.Csv => Rest(conn, title, dataset, FileKind.Csv),
             ConnectionType.Rest => Rest(conn, title, dataset, FileKind.Json),
@@ -64,6 +69,28 @@ public sealed class DataSourceResolver
     }
 
     private enum FileKind { Json, Excel, Csv }
+
+    /// <summary>
+    /// Build a SQLite-backed table item. There is no SQLite DOM class, so we start from a
+    /// SQL Server table item (which exposes a public <c>Table</c>) and set the data source's
+    /// Provider to "SQLITE". The server's DataSourceProvider fills in the .sqlite file path,
+    /// so the Database value written here is only a placeholder.
+    /// </summary>
+    private static DataSourceItem Sqlite(ConnectionConfig conn, string title, string dataset)
+    {
+        var dataSource = new MicrosoftSqlServerDataSource
+        {
+            Id = conn.Id,
+            Title = string.IsNullOrWhiteSpace(conn.Title) ? conn.Id : conn.Title,
+            Database = conn.Database,
+        };
+        dataSource.Provider = "SQLITE";
+
+        var item = new MicrosoftSqlServerDataSourceItem(title, dataSource);
+        if (!string.IsNullOrWhiteSpace(dataset)) item.Table = dataset;
+        if (item is IProcessDataOnServer process) process.ProcessDataOnServer = true;
+        return item;
+    }
 
     /// <summary>Build a database-backed item, setting host/port/db/schema + the table name + credentials' host bits.</summary>
     private static DataSourceItem Database(

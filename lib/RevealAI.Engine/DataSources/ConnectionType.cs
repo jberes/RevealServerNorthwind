@@ -17,6 +17,8 @@ public enum ConnectionType
     AmazonRedshift,
     Snowflake,
     GoogleBigQuery,
+    /// <summary>SQLite database file (local, no credentials). Database = file path.</summary>
+    Sqlite,
     /// <summary>Excel workbook reached over a public/anonymous REST URL.</summary>
     Excel,
     /// <summary>CSV file reached over a public/anonymous REST URL.</summary>

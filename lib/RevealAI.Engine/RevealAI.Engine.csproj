@@ -19,8 +19,8 @@
     embeds without forcing host apps to upgrade (NuGet picks the host's higher version if any).
   -->
   <ItemGroup>
-    <PackageReference Include="Reveal.Sdk.Dom" Version="0.1.668-beta" />
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
+    <PackageReference Include="Reveal.Sdk.Dom" Version="0.1.672-beta" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="8.0.0" />

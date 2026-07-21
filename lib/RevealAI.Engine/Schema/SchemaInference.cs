@@ -50,6 +50,27 @@ public static class SchemaInference
     }
 
     /// <summary>
+    /// Like <see cref="Enrich"/> but only re-infers the named columns (from sample values).
+    /// Used by SQLite introspection to type columns that have NO declared type (computed view
+    /// columns) WITHOUT re-typing declared text columns whose values merely look numeric
+    /// (e.g. PostalCode "98122", Extension "5467") — which would make Reveal read them as
+    /// integers and throw "cast String to Int64" at render. Does not call TagSemantics
+    /// (the caller runs it once afterward).
+    /// </summary>
+    internal static void EnrichOnly(DatasetSchema schema, ISet<string> columnNames)
+    {
+        foreach (var col in schema.Columns)
+        {
+            if (!columnNames.Contains(col.Name) || col.SampleValues.Count == 0 || col.DataType != DataType.Text)
+                continue;
+            var inferred = InferColumn(col.Name, col.SampleValues!);
+            col.DataType = inferred.DataType;
+            if (col.SemanticTag == SemanticTag.None)
+                col.SemanticTag = inferred.SemanticTag;
+        }
+    }
+
+    /// <summary>
     /// Set semantic tags (Currency, Percentage, Geography, Identifier, HighCardinality, lat/long)
     /// for every column WITHOUT changing data types. Safe for DB introspection where types are
     /// authoritative. Uses exact distinct counts when available.

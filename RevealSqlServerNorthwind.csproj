@@ -16,9 +16,9 @@
     <PackageReference Include="Reveal.Sdk.AI.AspNetCore" Version="1.4.107" />
     <PackageReference Include="Reveal.Sdk.AI.OpenAI" Version="1.4.107" />
     <PackageReference Include="Reveal.Sdk.AspNetCore" Version="2.1.0" />
-    <PackageReference Include="Reveal.Sdk.Data.Microsoft.SqlServer" Version="2.1.0" />
+    <PackageReference Include="Reveal.Sdk.Data.SQLite" Version="2.1.0" />
     <PackageReference Include="Reveal.Sdk.Dom" Version="0.1.672-beta" />
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.4" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.2.1" />
   </ItemGroup>
@@ -37,6 +37,8 @@
 <ItemGroup>
   <None Include="Dashboards\**\*" CopyToOutputDirectory="Always" />
   <None Include="Images\**\*" CopyToOutputDirectory="Always" />
+  <!-- The SQLite database is the app's data source; ship it to the output/publish folder. -->
+  <None Include="Data\northwind.sqlite" CopyToOutputDirectory="PreserveNewest" />
 </ItemGroup>
 
 <ItemGroup>

@@ -1,6 +1,6 @@
 using Reveal.Sdk;
 using Reveal.Sdk.Data;
-using Reveal.Sdk.Data.Microsoft.SqlServer;
+using Reveal.Sdk.Data.SQLite;
 
 namespace RevealSdk.Sdk
 {
@@ -13,22 +13,29 @@ namespace RevealSdk.Sdk
 
         public Task<bool> Filter(IRVUserContext userContext, RVDataSourceItem dataSourceItem)
         {
-            if (dataSourceItem is not RVSqlServerDataSourceItem sqlDataSourceItem)
+            if (dataSourceItem is not RVSQLiteDataSourceItem sqliteItem)
             {
                 return Task.FromResult(true);
             }
 
-            if (!userContext.Properties.TryGetValue("FilterTables", out var filterTablesObj) ||
-                filterTablesObj is not string[] filterTables ||
-                filterTables.Length == 0)
+            // The whitelist travels with the user context (populated by UserContextProvider
+            // from the metadata catalog's Tables collection). Absent/empty => no restriction.
+            // Properties can be null for non-HTTP contexts (e.g. AI metadata generation).
+            if (userContext?.Properties is null ||
+                !userContext.Properties.TryGetValue("FilteredTables", out var filteredTablesObj) ||
+                filteredTablesObj is not string[] filteredTables ||
+                filteredTables.Length == 0)
             {
                 return Task.FromResult(true);
             }
 
-            var tableBlocked = sqlDataSourceItem.Table != null && !filterTables.Contains(sqlDataSourceItem.Table);
-            var procedureBlocked = sqlDataSourceItem.Procedure != null && !filterTables.Contains(sqlDataSourceItem.Procedure);
+            var allowed = new HashSet<string>(filteredTables, StringComparer.OrdinalIgnoreCase);
 
-            return Task.FromResult(!tableBlocked && !procedureBlocked);
+            // Allow ONLY items whose table/view is in the whitelist. Items with no table
+            // (e.g. a raw custom query) are left untouched.
+            var tableBlocked = sqliteItem.Table != null && !allowed.Contains(sqliteItem.Table);
+
+            return Task.FromResult(!tableBlocked);
         }
     }
 }

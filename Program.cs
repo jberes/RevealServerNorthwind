@@ -1,6 +1,6 @@
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
-using Microsoft.Data.SqlClient;
+using Microsoft.Data.Sqlite;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
@@ -36,11 +36,17 @@ var builder = WebApplication.CreateBuilder(args);
 //      exactly this same set, so the UI and the AI agree on what is available.
 // For each whitelisted object we look up its real columns so the catalog carries
 // field metadata (which materially improves the AI's query/visualization quality).
-var sqlOptions = builder.Configuration.GetSection("SqlServer").Get<SqlServerOptions>()
-                 ?? new SqlServerOptions();
-var sqlSchema = string.IsNullOrWhiteSpace(sqlOptions.Schema) ? "dbo" : sqlOptions.Schema;
+var sqlOptions = builder.Configuration.GetSection("Sqlite").Get<SqliteOptions>()
+                 ?? new SqliteOptions();
 
-// The whitelist (bare, unqualified names). Captured by the /sql endpoints below too.
+// Resolve the SQLite file path (relative → anchored to the content root).
+var sqliteDbPath = string.IsNullOrWhiteSpace(sqlOptions.DatabasePath)
+    ? "Data/northwind.sqlite"
+    : sqlOptions.DatabasePath;
+if (!Path.IsPathRooted(sqliteDbPath))
+    sqliteDbPath = Path.Combine(builder.Environment.ContentRootPath, sqliteDbPath);
+
+// The whitelist (bare table/view names). Captured by the /sql endpoints below too.
 var catalogObjects = (sqlOptions.CatalogObjects ?? Array.Empty<string>())
     .Where(n => !string.IsNullOrWhiteSpace(n))
     .Select(n => n.Trim())
@@ -49,8 +55,8 @@ var catalogObjects = (sqlOptions.CatalogObjects ?? Array.Empty<string>())
 var catalogColumns = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
 try
 {
-    catalogColumns = DiscoverColumns(sqlOptions, catalogObjects);
-    Console.WriteLine($"[AI Catalog] Whitelisted {catalogObjects.Length} object(s): {string.Join(", ", catalogObjects)}");
+    catalogColumns = DiscoverColumns(sqliteDbPath, catalogObjects);
+    Console.WriteLine($"[AI Catalog] SQLite '{sqliteDbPath}' — whitelisted {catalogObjects.Length} object(s): {string.Join(", ", catalogObjects)}");
 }
 catch (Exception ex)
 {
@@ -64,6 +70,9 @@ catch (Exception ex)
 var catalogDir = Path.Combine(builder.Environment.ContentRootPath, "Reveal", "Metadata");
 Directory.CreateDirectory(catalogDir);
 var catalogPath = Path.Combine(catalogDir, "catalog.json");
+// Logical database name used to group metadata for the AI SDK. SQLite has no
+// database/schema concept, so we use the file's base name (e.g. "northwind").
+var sqliteDbName = Path.GetFileNameWithoutExtension(sqliteDbPath);
 var catalog = new
 {
     Datasources = new object[]
@@ -71,16 +80,17 @@ var catalog = new
         new
         {
             Id = "NorthwindSql",
-            Provider = "SQLServer",
+            Provider = "SQLITE",
             Databases = new object[]
             {
                 new
                 {
-                    Name = sqlOptions.Database,
+                    Name = sqliteDbName,
                     DiscoveryMode = "Restricted",
+                    // SQLite tables/views are unqualified (no schema prefix).
                     Tables = catalogObjects.Select(v => new
                     {
-                        Name = $"{sqlSchema}.{v}",
+                        Name = v,
                         Fields = (catalogColumns.TryGetValue(v, out var cols) ? cols : new List<string>())
                             .Select(c => new { Name = c })
                             .ToArray()
@@ -103,12 +113,13 @@ var catalogFilter = catalogObjects.Length > 0
 
 builder.Services.AddControllers().AddReveal(revealBuilder =>
 {
-    revealBuilder        
-        .AddAuthenticationProvider<AuthenticationProvider>()
+    // SQLite is a local file and needs no credentials, so there is no
+    // authentication provider (the Azure SQL Server connection was removed).
+    revealBuilder
         .AddDataSourceProvider<DataSourceProvider>()
         .AddObjectFilter<DataSourceItemFilter>()
         .AddUserContextProvider<UserContextProvider>()
-        .DataSources.RegisterMicrosoftSqlServer();
+        .DataSources.RegisterSQLite();
 
     revealBuilder
         .AddSettings(settings =>
@@ -118,8 +129,8 @@ builder.Services.AddControllers().AddReveal(revealBuilder =>
         });
 });
 
-builder.Services.Configure<SqlServerOptions>(
-    builder.Configuration.GetSection("SqlServer"));
+builder.Services.Configure<SqliteOptions>(
+    builder.Configuration.GetSection("Sqlite"));
 
 // ---- Authentication (JWT bearer) ---------------------------------------
 // The client logs in at /auth/login with credentials from the "Auth" config
@@ -530,89 +541,78 @@ app.MapDelete("/dashboards/{name}", (string name) =>
   .Produces(StatusCodes.Status404NotFound);
 
 // ---------------------------------------------------------------------------
-// SQL Server browsing endpoints (used by the client Connections page)
-// Connection details come from the "SqlServer" section of appsettings.json,
-// bound to SqlServerOptions and injected via IOptions<SqlServerOptions>.
+// SQLite browsing endpoints (used by the client Connections page).
+// The database file path comes from the "Sqlite" section of appsettings.json
+// (resolved to sqliteDbPath above). SQLite has no host, schema, or credentials.
+// The endpoints close over sqliteDbPath and catalogFilter.
 // ---------------------------------------------------------------------------
 
-// GET /sql/connection — connection metadata (no credentials) for the tree header
-app.MapGet("/sql/connection", (IOptions<SqlServerOptions> options) =>
+// GET /sql/connection — connection metadata for the tree header
+app.MapGet("/sql/connection", () => Results.Ok(new
 {
-    var o = options.Value;
-    return Results.Ok(new
-    {
-        host = o.Host,
-        database = o.Database,
-        schema = string.IsNullOrWhiteSpace(o.Schema) ? "dbo" : o.Schema
-    });
-});
+    database = Path.GetFileName(sqliteDbPath),
+    path = sqliteDbPath,
+    provider = "SQLite"
+}));
 
-// GET /sql/objects — list all tables and views in the configured schema
-app.MapGet("/sql/objects", async (IOptions<SqlServerOptions> options) =>
+// GET /sql/objects — list all tables and views (whitelist-filtered)
+app.MapGet("/sql/objects", async () =>
 {
-    var o = options.Value;
-    var schema = string.IsNullOrWhiteSpace(o.Schema) ? "dbo" : o.Schema;
     try
     {
-        await using var conn = new SqlConnection(BuildSqlConnectionString(o));
+        await using var conn = new SqliteConnection(SqliteConnString(sqliteDbPath));
         await conn.OpenAsync();
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"SELECT TABLE_NAME, TABLE_TYPE
-                            FROM INFORMATION_SCHEMA.TABLES
-                            WHERE TABLE_SCHEMA = @schema
-                            ORDER BY TABLE_NAME";
-        cmd.Parameters.AddWithValue("@schema", schema);
+        cmd.CommandText = @"SELECT name, type FROM sqlite_master
+                            WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
+                            ORDER BY name";
         await using var reader = await cmd.ExecuteReaderAsync();
 
         var objects = new List<object>();
         while (await reader.ReadAsync())
         {
             var objectName = reader.GetString(0);
-            // Whitelist: when SqlServer:CatalogObjects is set, the Connections page only
+            // Whitelist: when Sqlite:CatalogObjects is set, the Connections page only
             // shows those objects — the same set the Reveal AI metadata catalog is built from.
             if (catalogFilter != null && !catalogFilter.Contains(objectName)) continue;
             objects.Add(new
             {
                 name = objectName,
-                type = reader.GetString(1) == "VIEW" ? "view" : "table"
+                type = reader.GetString(1) == "view" ? "view" : "table"
             });
         }
         return Results.Ok(objects);
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Error listing SQL objects: {ex.Message}");
-        return Results.Problem($"Error listing SQL objects: {ex.Message}");
+        Console.WriteLine($"Error listing SQLite objects: {ex.Message}");
+        return Results.Problem($"Error listing SQLite objects: {ex.Message}");
     }
 }).Produces(StatusCodes.Status200OK)
   .ProducesProblem(StatusCodes.Status500InternalServerError);
 
 // GET /sql/data/{name}?top=N — return rows + column metadata for a table/view
-app.MapGet("/sql/data/{name}", async (string name, int? top, IOptions<SqlServerOptions> options) =>
+app.MapGet("/sql/data/{name}", async (string name, int? top) =>
 {
-    var o = options.Value;
-    var schema = string.IsNullOrWhiteSpace(o.Schema) ? "dbo" : o.Schema;
     try
     {
-        await using var conn = new SqlConnection(BuildSqlConnectionString(o));
+        await using var conn = new SqliteConnection(SqliteConnString(sqliteDbPath));
         await conn.OpenAsync();
 
-        // Verify the object exists in the schema. This also guards against SQL
-        // injection: only a name that matches a real catalog entry is queried.
+        // Verify the object exists. This also guards the interpolated name below:
+        // only a name that matches a real catalog entry is ever queried.
         await using (var check = conn.CreateCommand())
         {
-            check.CommandText = @"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
-                                  WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @name";
-            check.Parameters.AddWithValue("@schema", schema);
-            check.Parameters.AddWithValue("@name", name);
+            check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE name = $name AND type IN ('table','view')";
+            check.Parameters.AddWithValue("$name", name);
             var exists = Convert.ToInt32(await check.ExecuteScalarAsync() ?? 0);
             if (exists == 0)
-                return Results.NotFound(new { message = $"Object '{name}' not found in schema '{schema}'." });
+                return Results.NotFound(new { message = $"Object '{name}' not found." });
         }
 
         var limit = top is > 0 and <= 100000 ? top.Value : 1000;
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT TOP ({limit}) * FROM [{schema}].[{name}]";
+        cmd.CommandText = $"SELECT * FROM \"{name.Replace("\"", "\"\"")}\" LIMIT {limit}";
         await using var reader = await cmd.ExecuteReaderAsync();
 
         var columns = new List<object>();
@@ -628,7 +628,7 @@ app.MapGet("/sql/data/{name}", async (string name, int? top, IOptions<SqlServerO
             rows.Add(row);
         }
 
-        return Results.Ok(new { name, schema, columns, rowCount = rows.Count, rows });
+        return Results.Ok(new { name, columns, rowCount = rows.Count, rows });
     }
     catch (Exception ex)
     {
@@ -639,66 +639,41 @@ app.MapGet("/sql/data/{name}", async (string name, int? top, IOptions<SqlServerO
   .Produces(StatusCodes.Status404NotFound)
   .ProducesProblem(StatusCodes.Status500InternalServerError);
 
-// GET /sql/rowcounts — { name: rowCount } for every table/view in the schema.
-// Tables use fast catalog statistics (approximate); views need COUNT(*) (exact),
-// each guarded by a short timeout so one slow view can't stall the rest. Best-effort:
-// objects whose count can't be obtained are simply omitted. Called by the tree to
-// populate per-object chips AFTER it renders, so the list never waits on this.
-app.MapGet("/sql/rowcounts", async (IOptions<SqlServerOptions> options, CancellationToken ct) =>
+// GET /sql/rowcounts — { name: rowCount } for every whitelisted table/view.
+// SQLite has no stored statistics, so each is a COUNT(*) (the Northwind DB is
+// small). Best-effort: objects whose count can't be obtained are simply omitted.
+app.MapGet("/sql/rowcounts", async (CancellationToken ct) =>
 {
-    var o = options.Value;
-    var schema = string.IsNullOrWhiteSpace(o.Schema) ? "dbo" : o.Schema;
     var counts = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
     try
     {
-        await using var conn = new SqlConnection(BuildSqlConnectionString(o));
+        await using var conn = new SqliteConnection(SqliteConnString(sqliteDbPath));
         await conn.OpenAsync(ct);
 
-        // Tables: approximate row counts from partition stats (instant, no scan).
+        var names = new List<string>();
         await using (var cmd = conn.CreateCommand())
         {
-            cmd.CommandText = @"SELECT t.name, SUM(p.rows)
-                                FROM sys.tables t
-                                JOIN sys.schemas s ON s.schema_id = t.schema_id
-                                JOIN sys.partitions p ON p.object_id = t.object_id AND p.index_id IN (0, 1)
-                                WHERE s.name = @schema
-                                GROUP BY t.name";
-            cmd.Parameters.AddWithValue("@schema", schema);
+            cmd.CommandText = @"SELECT name FROM sqlite_master
+                                WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'";
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
             {
-                var tableName = r.GetString(0);
-                if (catalogFilter != null && !catalogFilter.Contains(tableName)) continue;
-                if (!await r.IsDBNullAsync(1, ct)) counts[tableName] = Convert.ToInt64(r.GetValue(1));
+                var n = r.GetString(0);
+                if (catalogFilter != null && !catalogFilter.Contains(n)) continue;
+                names.Add(n);
             }
         }
 
-        // Views: no stored stats — COUNT_BIG(*) each, guarded with a short timeout.
-        var views = new List<string>();
-        await using (var cmd = conn.CreateCommand())
-        {
-            cmd.CommandText = "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = @schema";
-            cmd.Parameters.AddWithValue("@schema", schema);
-            await using var r = await cmd.ExecuteReaderAsync(ct);
-            while (await r.ReadAsync(ct))
-            {
-                var viewName = r.GetString(0);
-                // Only compute counts for whitelisted views (matches /sql/objects).
-                if (catalogFilter != null && !catalogFilter.Contains(viewName)) continue;
-                views.Add(viewName);
-            }
-        }
-        foreach (var v in views)
+        foreach (var n in names)
         {
             try
             {
                 await using var cmd = conn.CreateCommand();
-                cmd.CommandTimeout = 8;
-                cmd.CommandText = $"SELECT COUNT_BIG(*) FROM [{schema}].[{v}]";   // v is a real catalog name, not user input
-                var n = await cmd.ExecuteScalarAsync(ct);
-                if (n is not null && n != DBNull.Value) counts[v] = Convert.ToInt64(n);
+                cmd.CommandText = $"SELECT COUNT(*) FROM \"{n.Replace("\"", "\"\"")}\"";   // n is a real catalog name
+                var v = await cmd.ExecuteScalarAsync(ct);
+                if (v is not null && v != DBNull.Value) counts[n] = Convert.ToInt64(v);
             }
-            catch { /* skip views that time out or error — chips are best-effort */ }
+            catch { /* best-effort chips */ }
         }
     }
     catch (Exception ex)
@@ -743,13 +718,13 @@ static string ComposeGuidance(string? userGuidance) =>
 // editable visualization suggestions.
 app.MapPost("/ai/visualizations/recommend",
     async (RecommendRequest req, SchemaIntrospectionService introspect, DashboardAiService svc,
-           IOptions<SqlServerOptions> opt, CancellationToken ct) =>
+           CancellationToken ct) =>
 {
     if (string.IsNullOrWhiteSpace(req?.Dataset))
         return Results.BadRequest(new { message = "A dataset (table or view name) is required." });
     try
     {
-        var conn = BuildAiConnection(opt.Value);
+        var conn = BuildAiConnection(sqliteDbPath);
         var schema = await introspect.IntrospectAsync(conn, req.Dataset, 50, ct);
         var recs = await svc.RecommendAsync(schema,
             new RecommendationRequest { Guidance = ComposeGuidance(req.Guidance) }, ct);
@@ -774,7 +749,7 @@ app.MapPost("/ai/visualizations/recommend",
 // and return its Reveal DOM JSON for live rendering on the client.
 app.MapPost("/ai/visualizations/generate",
     async (GenerateRequest req, SchemaIntrospectionService introspect, DashboardAiService svc,
-           IOptions<SqlServerOptions> opt, CancellationToken ct) =>
+           CancellationToken ct) =>
 {
     if (string.IsNullOrWhiteSpace(req?.Dataset))
         return Results.BadRequest(new { message = "A dataset (table or view name) is required." });
@@ -782,14 +757,14 @@ app.MapPost("/ai/visualizations/generate",
         return Results.BadRequest(new { message = "Select at least one visualization to generate." });
     try
     {
-        var conn = BuildAiConnection(opt.Value);
+        var conn = BuildAiConnection(sqliteDbPath);
         var schema = await introspect.IntrospectAsync(conn, req.Dataset, 50, ct);
         var spec = new DashboardSpec
         {
             Title = string.IsNullOrWhiteSpace(req.Title) ? req.Dataset : req.Title,
             Connection = conn,
             ConnectionId = conn.Id,
-            Dataset = req.Dataset,           // bare table name; conn.Schema supplies the schema
+            Dataset = req.Dataset,           // bare table/view name (SQLite has no schema)
             Visualizations = req.Visualizations
         };
         var result = svc.Compile(spec, schema);
@@ -860,70 +835,48 @@ app.MapControllers();
 app.Run();
 
 // ---------------------------------------------------------------------------
-// Helper: build a RevealAI.Engine ConnectionConfig from the configured SqlServer
-// options. Type is forced to SqlServer (the Microsoft SQL connector) so the
-// compiled .rdash uses the SAME data-source shape the existing dashboards use
-// (RVSqlServerDataSource id "sqlServer"), which the client's onDataSourcesRequested
-// and the server's DataSourceProvider/AuthenticationProvider already resolve.
+// Helper: build a RevealAI.Engine ConnectionConfig for the SQLite database.
+// Type is Sqlite and Database carries the .sqlite file path. The compiled .rdash
+// uses the SQLite provider, which the server's DataSourceProvider resolves (it
+// injects the file path) — no credentials are involved.
 // ---------------------------------------------------------------------------
-static ConnectionConfig BuildAiConnection(SqlServerOptions o) => new()
+static ConnectionConfig BuildAiConnection(string databasePath) => new()
 {
     Id = "sqlServer",
-    Title = "SQL Server Data Source",
-    Type = ConnectionType.SqlServer,
-    Host = o.Host,
-    Database = o.Database,
-    Username = o.Username,
-    Password = o.Password,
-    Schema = string.IsNullOrWhiteSpace(o.Schema) ? "dbo" : o.Schema
+    Title = "SQLite Data Source",
+    Type = ConnectionType.Sqlite,
+    Database = databasePath
 };
 
 // ---------------------------------------------------------------------------
-// Helper: build a SQL Server connection string from the configured options.
-// Encrypt + TrustServerCertificate are set for Azure SQL compatibility.
+// Helper: build a Microsoft.Data.Sqlite read-only connection string for a file.
 // ---------------------------------------------------------------------------
-static string BuildSqlConnectionString(SqlServerOptions o)
-{
-    return new SqlConnectionStringBuilder
-    {
-        DataSource = o.Host,
-        InitialCatalog = o.Database,
-        UserID = o.Username,
-        Password = o.Password,
-        TrustServerCertificate = o.TrustServerCertificate,
-        Encrypt = true
-    }.ConnectionString;
-}
+static string SqliteConnString(string dbPath) =>
+    new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadOnly }.ConnectionString;
 
 // ---------------------------------------------------------------------------
 // Helper: read the column names for a specific set of tables/views (the catalog
-// whitelist) from the configured database. Used at startup to build the AI
-// metadata catalog with field metadata for exactly the whitelisted objects.
-// Works for both tables and views — INFORMATION_SCHEMA.COLUMNS covers both.
-// The dictionary is pre-seeded with the requested names (case-insensitive), so
-// only those objects' columns are retained even though the query reads the schema.
+// whitelist) from the SQLite file. Used at startup to build the AI metadata
+// catalog with field metadata for exactly the whitelisted objects. PRAGMA
+// table_info works for both tables and views. The dictionary is pre-seeded with
+// the requested names (case-insensitive), so only those objects are retained.
 // ---------------------------------------------------------------------------
-static Dictionary<string, List<string>> DiscoverColumns(SqlServerOptions o, string[] names)
+static Dictionary<string, List<string>> DiscoverColumns(string dbPath, string[] names)
 {
     var columns = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
     if (names is null || names.Length == 0) return columns;
-
-    var schema = string.IsNullOrWhiteSpace(o.Schema) ? "dbo" : o.Schema;
     foreach (var n in names) columns[n] = new List<string>();
 
-    using var conn = new SqlConnection(BuildSqlConnectionString(o));
+    using var conn = new SqliteConnection(SqliteConnString(dbPath));
     conn.Open();
 
-    using var cmd = conn.CreateCommand();
-    cmd.CommandText = @"SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-                        WHERE TABLE_SCHEMA = @schema
-                        ORDER BY TABLE_NAME, ORDINAL_POSITION";
-    cmd.Parameters.AddWithValue("@schema", schema);
-    using var r = cmd.ExecuteReader();
-    while (r.Read())
+    foreach (var n in names)
     {
-        var table = r.GetString(0);
-        if (columns.TryGetValue(table, out var list)) list.Add(r.GetString(1));
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"PRAGMA table_info(\"{n.Replace("\"", "\"\"")}\")";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            columns[n].Add(r.GetString(1)); // ordinal 1 = column name
     }
 
     return columns;

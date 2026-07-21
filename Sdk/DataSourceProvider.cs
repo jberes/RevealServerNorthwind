@@ -1,74 +1,48 @@
-﻿using Reveal.Sdk;
+using Microsoft.Extensions.Options;
+using Reveal.Sdk;
 using Reveal.Sdk.Data;
-using Reveal.Sdk.Data.Microsoft.SqlServer;
+using Reveal.Sdk.Data.SQLite;
 
 namespace RevealSdk.Sdk
 {
     public class DataSourceProvider : IRVDataSourceProvider
     {
+        private readonly string _databasePath;
+
+        // Resolve the SQLite file path once. Relative paths (the default
+        // "Data/northwind.sqlite") are anchored to the content root so they resolve the
+        // same whether the process CWD is the project dir or an Azure App Service root.
+        public DataSourceProvider(IOptions<SqliteOptions> options, IWebHostEnvironment env)
+        {
+            var path = string.IsNullOrWhiteSpace(options.Value.DatabasePath)
+                ? "Data/northwind.sqlite"
+                : options.Value.DatabasePath;
+            _databasePath = Path.IsPathRooted(path) ? path : Path.Combine(env.ContentRootPath, path);
+        }
+
         public Task<RVDataSourceItem> ChangeDataSourceItemAsync(IRVUserContext userContext,
             string dashboardId, RVDataSourceItem dataSourceItem)
         {
-            if (dataSourceItem is RVSqlServerDataSourceItem sqlServerDsi)
+            if (dataSourceItem is RVSQLiteDataSourceItem sqliteItem)
             {
-                ChangeDataSourceAsync(userContext, sqlServerDsi.DataSource);
+                // Reveal does NOT carry changes made in ChangeDataSourceAsync into the item,
+                // so set the database path on the item's data source here as well.
+                ChangeDataSourceAsync(userContext, sqliteItem.DataSource);
 
-                // Treat the incoming item's Table as the object to query. If Table
-                // isn't set, fall back to the item Id (the AI/catalog passes the
-                // table/view name as the datasource item identifier).
-                var table = !string.IsNullOrWhiteSpace(sqlServerDsi.Table)
-                    ? sqlServerDsi.Table
-                    : sqlServerDsi.Id;
-
-                if (!string.IsNullOrWhiteSpace(table))
-                {
-                    sqlServerDsi.Table = table;
-                    sqlServerDsi.CustomQuery = $"SELECT * FROM [{table}]";
-                }
-
-                return Task.FromResult(dataSourceItem);
+                // AI/catalog-generated items pass the table/view name as the item Id when
+                // Table isn't set explicitly — fall back to it (matches the old SQL provider).
+                if (string.IsNullOrWhiteSpace(sqliteItem.Table) && !string.IsNullOrWhiteSpace(sqliteItem.Id))
+                    sqliteItem.Table = sqliteItem.Id;
             }
-
-            ChangeDataSourceAsync(userContext, dataSourceItem.DataSource);
 
             return Task.FromResult(dataSourceItem);
         }
 
-        public Task<RVDashboardDataSource> ChangeDataSourceAsync(IRVUserContext userContext, RVDashboardDataSource dataSource)
+        public Task<RVDashboardDataSource> ChangeDataSourceAsync(IRVUserContext userContext,
+            RVDashboardDataSource dataSource)
         {
-            if (dataSource is RVSqlServerDataSource sqlServerDataSource)
-            {
-                var host = userContext.Properties.TryGetValue("Host", out var hostValue)
-                    ? hostValue?.ToString()
-                    : null;
-                var database = userContext.Properties.TryGetValue("Database", out var databaseValue)
-                    ? databaseValue?.ToString()
-                    : null;
-                var schema = userContext.Properties.TryGetValue("Schema", out var schemaValue)
-                    ? schemaValue?.ToString()
-                    : null;
-                var trustServerCertificate = userContext.Properties.TryGetValue("TrustServerCertificate", out var trustValue)
-                    && bool.TryParse(trustValue?.ToString(), out var contextTrustServerCertificate)
-                        ? contextTrustServerCertificate
-                        : true;
-
-                if (!string.IsNullOrWhiteSpace(host))
-                {
-                    sqlServerDataSource.Host = host;
-                }
-
-                if (!string.IsNullOrWhiteSpace(database))
-                {
-                    sqlServerDataSource.Database = database;
-                }
-
-                if (!string.IsNullOrWhiteSpace(schema))
-                {
-                    sqlServerDataSource.Schema = schema;
-                }
-
-                sqlServerDataSource.TrustServerCertificate = trustServerCertificate;
-            }
+            if (dataSource is RVSQLiteDataSource sqlite)
+                sqlite.Database = _databasePath;
 
             return Task.FromResult(dataSource);
         }

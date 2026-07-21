@@ -1,0 +1,799 @@
+using Microsoft.Extensions.FileProviders;
+using System.IO.Compression;
+using Reveal.Sdk;
+using Reveal.Sdk.AI;
+using Reveal.Sdk.Dom;
+using RevealExcel.Sdk;
+using RevealSdk.Sdk;
+// AI support — requires Reveal.Sdk.AspNetCore >= 1.8.4 and an OpenAI API key in appsettings.json
+// using Reveal.Sdk.AI;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// ---- Auto-register all Excel files in the Data folder as AI datasources ----
+// This runs at startup so any file present in Data/ is immediately available
+// to the AI chat. After uploading a new file, restart the server.
+var dataDir = Path.Combine(Directory.GetCurrentDirectory(), "Data");
+if (Directory.Exists(dataDir))
+{
+    var excelIds = Directory.GetFiles(dataDir, "*.xlsx")
+        .Concat(Directory.GetFiles(dataDir, "*.xls"))
+        .Select(f => Path.GetFileNameWithoutExtension(f))
+        .ToArray();
+
+    var aiMetadata = new Dictionary<string, string?>();
+    for (int idx = 0; idx < excelIds.Length; idx++)
+    {
+        aiMetadata[$"RevealAI:MetadataManager:Datasources:{idx}:Id"]       = excelIds[idx];
+        aiMetadata[$"RevealAI:MetadataManager:Datasources:{idx}:Provider"] = "WebService";
+    }
+    builder.Configuration.AddInMemoryCollection(aiMetadata);
+}
+// ---------------------------------------------------------------------------
+
+builder.Services.AddControllers().AddReveal(builder =>
+{
+    builder        
+        .AddDataSourceProvider<DataSourceProvider>()
+        .AddSettings(settings =>
+        {
+            
+            settings.LocalFileStoragePath = "Data";
+        });
+});
+
+// ---- AI Support --------------------------------------------------------
+// Uncomment the block below once you have:
+//   1. Updated Reveal.Sdk.AspNetCore to >= 1.8.4
+//   2. Added your OpenAI API key to appsettings.json under RevealAI:OpenAI:ApiKey
+//
+builder.Services.AddRevealAI()
+    .AddOpenAI(settings =>
+    {
+        settings.ApiKey = "
+        settings.ModelId = "gpt-4.1";
+    });
+// -------------------------------------------------------------------------
+
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+builder.Services.AddCors(options =>
+{
+  options.AddPolicy("AllowAll",
+    policy => policy
+      .AllowAnyOrigin()
+      .AllowAnyHeader()
+      .AllowAnyMethod()
+      .WithExposedHeaders("*")
+  );
+});
+
+var app = builder.Build();
+
+// Ensure required directories exist (critical for Azure App Service where they may not be present)
+var imagesDir = Path.Combine(builder.Environment.ContentRootPath, "Images");
+var dashboardsDir = Path.Combine(builder.Environment.ContentRootPath, "Dashboards");
+var dataDirectory = Path.Combine(builder.Environment.ContentRootPath, "Data");
+Directory.CreateDirectory(imagesDir);
+Directory.CreateDirectory(dashboardsDir);
+Directory.CreateDirectory(dataDirectory);
+
+// CORS must be before other middleware
+app.UseCors("AllowAll");
+
+// Explicit OPTIONS handler for preflight requests (Azure App Service compatibility)
+app.Use(async (context, next) =>
+{
+    if (context.Request.Method == "OPTIONS")
+    {
+        context.Response.Headers.Append("Access-Control-Allow-Origin", "*");
+        context.Response.Headers.Append("Access-Control-Allow-Methods", "*");
+        context.Response.Headers.Append("Access-Control-Allow-Headers", "*");
+        context.Response.StatusCode = 200;
+        await context.Response.CompleteAsync();
+        return;
+    }
+    await next();
+});
+
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(imagesDir),
+    RequestPath = "/Images",
+    OnPrepareResponse = ctx =>
+    {
+        ctx.Context.Response.Headers.Append("Access-Control-Allow-Origin", "*");
+        ctx.Context.Response.Headers.Append("Access-Control-Allow-Headers", "*");
+        ctx.Context.Response.Headers.Append("Access-Control-Allow-Methods", "*");
+    }
+});
+
+app.UseSwagger();
+app.UseSwaggerUI();
+
+// Serve Excel files from the Data folder at /data/{filename}.xlsx
+var dataFolderPath = Path.Combine(Directory.GetCurrentDirectory(), "Data");
+if (!Directory.Exists(dataFolderPath))
+    Directory.CreateDirectory(dataFolderPath);
+
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(dataFolderPath),
+    RequestPath = "/data",
+    ServeUnknownFileTypes = false,
+    OnPrepareResponse = ctx =>
+    {
+        ctx.Context.Response.Headers.Append("Access-Control-Allow-Origin", "*");
+    }
+});
+
+
+app.MapGet("/dashboards/names", () =>
+{
+    try
+    {
+        string folderPath = Path.Combine(Directory.GetCurrentDirectory(), "Dashboards");
+        var files = Directory.GetFiles(folderPath);
+        Random rand = new();
+
+        var fileNames = files.Select(file =>
+        {
+            try
+            {
+                return new DashboardNames
+                {
+                    DashboardFileName = Path.GetFileNameWithoutExtension(file),
+                    DashboardTitle = RdashDocument.Load(file).Title
+                };
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error Reading FileData {file}: {ex.Message}");
+                return null;
+            }
+        }).Where(fileData => fileData != null).ToList();
+
+        return Results.Ok(fileNames);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error Reading Directory : {ex.Message}");
+        return Results.Problem("An unexpected error occurred while processing the request.");
+    }
+
+}).Produces<IEnumerable<DashboardNames>>(StatusCodes.Status200OK)
+.Produces(StatusCodes.Status404NotFound)
+.ProducesProblem(StatusCodes.Status500InternalServerError);
+
+app.MapGet("/dashboards/{name}/thumbnail", async (string name) =>
+{
+    var path = "dashboards/" + name + ".rdash";
+    if (File.Exists(path))
+    {
+        var dashboard = new Dashboard(path);
+        var info = await dashboard.GetInfoAsync(Path.GetFileNameWithoutExtension(path));
+        return TypedResults.Ok(info);
+    }
+    else
+    {
+        return Results.NotFound();
+    }
+});
+
+app.MapGet("dashboards/visualizations", () =>
+{
+    try
+    {
+        var allVisualizationChartInfos = new List<VisualizationChartInfo>();
+        var dashboardFiles = Directory.GetFiles("Dashboards", "*.rdash");
+
+        foreach (var filePath in dashboardFiles)
+        {
+            try
+            {
+                var document = RdashDocument.Load(filePath);
+                foreach (var viz in document.Visualizations)
+                {
+                    try
+                    {
+                        var chartInfo = new VisualizationChartInfo
+                        {
+                            DashboardFileName = Path.GetFileNameWithoutExtension(filePath),
+                            DashboardTitle = document.Title,
+                            VizId = viz.Id,
+                            VizTitle = viz.Title,
+                            VizChartType = viz.ChartType.ToString(),
+                        };
+                        allVisualizationChartInfos.Add(chartInfo);
+                    }
+                    catch (Exception vizEx)
+                    {
+                        Console.WriteLine($"Error processing visualization {viz.Id} in file {filePath}: {vizEx.Message}");
+                    }
+                }
+            }
+            catch (Exception fileEx)
+            {
+                Console.WriteLine($"Error processing file {filePath}: {fileEx.Message}");
+            }
+        }
+        return Results.Ok(allVisualizationChartInfos);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"An error occurred: {ex.Message}");
+    }
+
+}).Produces<IEnumerable<VisualizationChartInfo>>(StatusCodes.Status200OK)
+  .Produces(StatusCodes.Status500InternalServerError);
+
+app.MapGet("/data/files", () =>
+{
+    try
+    {
+        string folderPath = Path.Combine(Directory.GetCurrentDirectory(), "Data");
+        
+        if (!Directory.Exists(folderPath))
+        {
+            return Results.NotFound("Data folder not found.");
+        }
+
+        var files = Directory.GetFiles(folderPath);
+        var fileNames = files.Select(file => Path.GetFileNameWithoutExtension(file)).ToList();
+
+        return Results.Ok(fileNames);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error reading Data directory: {ex.Message}");
+        return Results.Problem("An unexpected error occurred while processing the request.");
+    }
+}).Produces<IEnumerable<string>>(StatusCodes.Status200OK)
+  .Produces(StatusCodes.Status404NotFound)
+  .ProducesProblem(StatusCodes.Status500InternalServerError);
+
+app.MapPost("/data/upload", async (IFormFile file) =>
+{
+    try
+    {
+        if (file == null || file.Length == 0)
+        {
+            return Results.BadRequest(new { message = "No file provided." });
+        }
+
+        var allowedExtensions = new[] { ".xlsx", ".xls" };
+        var fileExtension = Path.GetExtension(file.FileName).ToLowerInvariant();
+
+        if (!allowedExtensions.Contains(fileExtension))
+        {
+            return Results.BadRequest(new { message = "Only Excel files (.xlsx, .xls) are allowed." });
+        }
+
+        string folderPath = Path.Combine(Directory.GetCurrentDirectory(), "Data");
+        
+        if (!Directory.Exists(folderPath))
+        {
+            Directory.CreateDirectory(folderPath);
+        }
+
+        var fileName = Path.GetFileName(file.FileName);
+        var filePath = Path.Combine(folderPath, fileName);
+
+        if (File.Exists(filePath))
+        {
+            return Results.Conflict(new { message = $"File '{fileName}' already exists." });
+        }
+
+        using (var stream = new FileStream(filePath, FileMode.Create))
+        {
+            await file.CopyToAsync(stream);
+        }
+
+        return Results.Ok(new { message = "File uploaded successfully.", fileName = fileName });
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error uploading file: {ex.Message}");
+        return Results.Problem("An error occurred while uploading the file.");
+    }
+}).Accepts<IFormFile>("multipart/form-data")
+  .Produces<object>(StatusCodes.Status200OK)
+  .Produces<object>(StatusCodes.Status400BadRequest)
+  .Produces<object>(StatusCodes.Status409Conflict)
+  .ProducesProblem(StatusCodes.Status500InternalServerError)
+  .DisableAntiforgery();
+
+
+// Check if a dashboard name already exists
+app.MapGet("/isduplicatename/{name}", (string name) =>
+{
+    var folderPath = Path.Combine(Directory.GetCurrentDirectory(), "Dashboards");
+    return Results.Ok(File.Exists(Path.Combine(folderPath, $"{name}.rdash")));
+});
+
+// POST /dashboards/{name} — create new dashboard
+// Accepts either raw rdash bytes (ZIP) from Reveal SDK or raw JSON from AI Assistant.
+// Raw JSON is automatically wrapped in a ZIP to produce a valid .rdash file.
+app.MapPost("/dashboards/{name}", async (HttpRequest request, string name) =>
+{
+    var ms = new MemoryStream();
+    await request.Body.CopyToAsync(ms);
+    var bytes = ms.ToArray();
+    var rdashBytes = WrapJsonAsRdashIfNeeded(bytes);
+    var filePath = Path.Combine(Directory.GetCurrentDirectory(), "Dashboards", $"{name}.rdash");
+    await File.WriteAllBytesAsync(filePath, rdashBytes);
+    return Results.Ok();
+}).Produces(StatusCodes.Status200OK);
+
+// PUT /dashboards/{name} — overwrite an existing dashboard file
+// Accepts either raw rdash bytes (ZIP) from Reveal SDK or raw JSON from AI Assistant.
+app.MapPut("/dashboards/{name}", async (HttpRequest request, string name) =>
+{
+    var filePath = Path.Combine(Directory.GetCurrentDirectory(), "Dashboards", $"{name}.rdash");
+    if (!File.Exists(filePath)) return Results.NotFound();
+    var ms = new MemoryStream();
+    await request.Body.CopyToAsync(ms);
+    var rdashBytes = WrapJsonAsRdashIfNeeded(ms.ToArray());
+    await File.WriteAllBytesAsync(filePath, rdashBytes);
+    return Results.Ok();
+}).Produces(StatusCodes.Status200OK)
+  .Produces(StatusCodes.Status404NotFound);
+
+// DELETE /data/files/{name} — delete an Excel file from the Data folder
+app.MapDelete("/data/files/{name}", (string name) =>
+{
+    var folderPath = Path.Combine(Directory.GetCurrentDirectory(), "Data");
+    var xlsxPath = Path.Combine(folderPath, $"{name}.xlsx");
+    var xlsPath  = Path.Combine(folderPath, $"{name}.xls");
+    var filePath = File.Exists(xlsxPath) ? xlsxPath : File.Exists(xlsPath) ? xlsPath : null;
+    if (filePath is null) return Results.NotFound();
+    File.Delete(filePath);
+    return Results.Ok();
+}).Produces(StatusCodes.Status200OK)
+  .Produces(StatusCodes.Status404NotFound);
+
+// DELETE /dashboards/{name} — remove a dashboard file
+app.MapDelete("/dashboards/{name}", (string name) =>
+{
+    var filePath = Path.Combine(Directory.GetCurrentDirectory(), "Dashboards", $"{name}.rdash");
+    if (!File.Exists(filePath)) return Results.NotFound();
+    File.Delete(filePath);
+    return Results.Ok();
+}).Produces(StatusCodes.Status200OK)
+  .Produces(StatusCodes.Status404NotFound);
+
+app.UseHttpsRedirection();
+
+app.UseAuthorization();
+
+app.MapControllers();
+
+app.Run();
+
+// ---------------------------------------------------------------------------
+// Helper: if the bytes are raw JSON (not a ZIP), wrap them in a ZIP archive
+// so the file is a valid .rdash (which is just a ZIP containing dashboard.json).
+// ZIP files start with the PK magic bytes 0x50 0x4B.
+// ---------------------------------------------------------------------------
+static byte[] WrapJsonAsRdashIfNeeded(byte[] bytes)
+{
+    // Already a ZIP/rdash — pass through unchanged
+    if (bytes.Length >= 2 && bytes[0] == 0x50 && bytes[1] == 0x4B)
+        return bytes;
+
+    // Raw JSON from AI Assistant — wrap in a ZIP entry named "dashboard.json"
+    using var zipMs = new MemoryStream();
+    using (var zip = new ZipArchive(zipMs, ZipArchiveMode.Create, leaveOpen: true))
+    {
+        var entry = zip.CreateEntry("dashboard.json", CompressionLevel.Fastest);
+        using var entryStream = entry.Open();
+        entryStream.Write(bytes, 0, bytes.Length);
+    }
+    return zipMs.ToArray();
+}
+
+-------------------
+
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { Database, Upload, FileSpreadsheet, X, Eye, Trash2, RefreshCw } from 'lucide-react'
+import { IgrSpreadsheet } from 'igniteui-react-spreadsheet'
+import { Workbook } from 'igniteui-react-excel'
+import { Dialog } from '../components/Dialog'
+import './Connections.css'
+import { BASE_URL } from '../config'
+
+interface ExcelFile {
+  name: string
+  url: string
+}
+
+export default function Connections() {
+  const [files, setFiles] = useState<ExcelFile[]>([])
+  const [selectedFile, setSelectedFile] = useState<ExcelFile | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const [uploadSuccess, setUploadSuccess] = useState<string | null>(null)
+  const [dragOver, setDragOver] = useState(false)
+  const [workbookLoading, setWorkbookLoading] = useState(false)
+  const [fileToDelete, setFileToDelete] = useState<string | null>(null)
+  const [deleteFileDialogOpen, setDeleteFileDialogOpen] = useState(false)
+  const [deleteFilePending, setDeleteFilePending] = useState(false)
+  const spreadsheetRef = useRef<IgrSpreadsheet>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  // Cache parsed workbooks so each file is only fetched+parsed once
+  const workbookCache = useRef<Map<string, any>>(new Map())
+  // AbortController for the active fetch so rapid switching cancels stale requests
+  const fetchAbortRef = useRef<AbortController | null>(null)
+
+  // Load file list from server
+  const fetchFiles = useCallback(async () => {
+    setLoading(true)
+    try {
+      const resp = await fetch(`${BASE_URL}/data/files`)
+      if (!resp.ok) throw new Error('Failed to fetch files')
+      const names: string[] = await resp.json()
+      const mapped: ExcelFile[] = names.map(n => ({
+        name: n,
+        url: `${BASE_URL}/data/${n}.xlsx`,
+      }))
+      setFiles(mapped)
+    } catch {
+      setFiles([])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchFiles() }, [fetchFiles])
+
+  // Load workbook into spreadsheet
+  const loadWorkbook = useCallback(async (file: ExcelFile) => {
+    if (!spreadsheetRef.current) return
+
+    // Serve from cache — instant, no network or parse needed
+    const cached = workbookCache.current.get(file.name)
+    if (cached) {
+      spreadsheetRef.current.workbook = cached
+      return
+    }
+
+    // Cancel any previous in-flight fetch
+    fetchAbortRef.current?.abort()
+    const controller = new AbortController()
+    fetchAbortRef.current = controller
+
+    setWorkbookLoading(true)
+    try {
+      const resp = await fetch(file.url, { signal: controller.signal })
+      if (!resp.ok) throw new Error('Failed to fetch Excel file')
+      const buffer = await resp.arrayBuffer()
+      const data = new Uint8Array(buffer)
+      Workbook.load(
+        data,
+        (workbook) => {
+          // Cache for future selections
+          workbookCache.current.set(file.name, workbook)
+          if (spreadsheetRef.current) {
+            spreadsheetRef.current.workbook = workbook
+          }
+          setWorkbookLoading(false)
+        },
+        (err) => {
+          console.error('Failed to load workbook:', err)
+          setWorkbookLoading(false)
+        }
+      )
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return  // stale request — silently ignore
+      console.error('Failed to fetch Excel file:', e)
+      setWorkbookLoading(false)
+    }
+  }, [])
+
+  const handleSelectFile = (file: ExcelFile) => {
+    setSelectedFile(file)
+    // loadWorkbook is triggered by the useEffect below once the
+    // IgrSpreadsheet has mounted (spreadsheetRef.current is valid)
+  }
+
+  // Run AFTER React commits the render that mounts IgrSpreadsheet
+  useEffect(() => {
+    if (selectedFile) loadWorkbook(selectedFile)
+  }, [selectedFile, loadWorkbook])
+
+  // Upload logic
+  const handleUploadFile = async (file: File) => {
+    if (!file.name.match(/\.(xlsx|xls)$/i)) {
+      setUploadError('Only Excel files (.xlsx, .xls) are allowed.')
+      return
+    }
+    setUploading(true)
+    setUploadError(null)
+    setUploadSuccess(null)
+    const formData = new FormData()
+    formData.append('file', file)
+    try {
+      const resp = await fetch(`${BASE_URL}/data/upload`, {
+        method: 'POST',
+        body: formData,
+      })
+      const json = await resp.json()
+      if (!resp.ok) throw new Error(json.message ?? 'Upload failed')
+      // Evict from cache so the fresh file is loaded on next preview
+      workbookCache.current.delete(file.name.replace(/\.(xlsx|xls)$/i, ''))
+      setUploadSuccess(`"${file.name}" uploaded successfully!`)
+      fetchFiles()
+    } catch (e: any) {
+      setUploadError(e.message ?? 'Upload failed')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setDragOver(false)
+    const file = e.dataTransfer.files[0]
+    if (file) handleUploadFile(file)
+  }, [])
+
+  const onFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) handleUploadFile(file)
+    e.target.value = ''
+  }
+
+  const handleDeleteFileConfirm = async () => {
+    if (!fileToDelete) return
+    setDeleteFilePending(true)
+    try {
+      await fetch(`${BASE_URL}/data/files/${encodeURIComponent(fileToDelete)}`, { method: 'DELETE' })
+      workbookCache.current.delete(fileToDelete)
+      setDeleteFileDialogOpen(false)
+      setFileToDelete(null)
+      // Refresh list and always select the first remaining file
+      setLoading(true)
+      const resp = await fetch(`${BASE_URL}/data/files`)
+      if (resp.ok) {
+        const names: string[] = await resp.json()
+        const mapped: ExcelFile[] = names.map(n => ({ name: n, url: `${BASE_URL}/data/${n}.xlsx` }))
+        setFiles(mapped)
+        setSelectedFile(mapped.length > 0 ? mapped[0] : null)
+      }
+      setLoading(false)
+    } finally {
+      setDeleteFilePending(false)
+    }
+  }
+
+  return (
+    <>
+    <div className="connections-page">
+      {/* Left panel – file list */}
+      <div className="conn-sidebar">
+        {/* Header */}
+        <div className="conn-sidebar-header">
+          <div className="flex items-center gap-2">
+            <Database size={16} style={{ color: 'var(--brand-500)' }} />
+            <span className="font-semibold" style={{ fontSize: 14 }}>Excel Connections</span>
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={fetchFiles} title="Refresh">
+            <RefreshCw size={14} />
+          </button>
+        </div>
+
+        {/* Drop zone */}
+        <div
+          className={`conn-dropzone${dragOver ? ' drag-over' : ''}`}
+          onDrop={onDrop}
+          onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+          onDragLeave={() => setDragOver(false)}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            style={{ display: 'none' }}
+            onChange={onFileInput}
+          />
+          {uploading ? (
+            <div className="flex flex-col items-center gap-2">
+              <div className="spinner" />
+              <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Uploading…</span>
+            </div>
+          ) : (
+            <>
+              <Upload size={20} style={{ color: 'var(--brand-500)', marginBottom: 6 }} />
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                Drop Excel file here
+              </span>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>or click to browse</span>
+            </>
+          )}
+        </div>
+
+        {/* Status messages */}
+        {uploadError && (
+          <div className="conn-alert error">
+            <X size={12} />
+            {uploadError}
+          </div>
+        )}
+        {uploadSuccess && (
+          <div className="conn-alert success">
+            {uploadSuccess}
+          </div>
+        )}
+
+        {/* File list */}
+        <div className="conn-file-list">
+          {loading ? (
+            <div className="flex items-center gap-2" style={{ padding: '20px 16px', color: 'var(--text-muted)', fontSize: 13 }}>
+              <div className="spinner" />
+              Loading files…
+            </div>
+          ) : files.length === 0 ? (
+            <div className="empty-state" style={{ padding: '32px 16px' }}>
+              <FileSpreadsheet size={28} style={{ opacity: 0.3 }} />
+              <h3>No files yet</h3>
+              <p>Upload an Excel file to get started</p>
+            </div>
+          ) : (
+            files.map(f => (
+              <div
+                key={f.name}
+                className={`conn-file-item${selectedFile?.name === f.name ? ' selected' : ''}`}
+                onClick={() => handleSelectFile(f)}
+              >
+                <div className="conn-file-icon">
+                  <FileSpreadsheet size={18} color="#217346" />
+                </div>
+                <div className="conn-file-info">
+                  <div className="font-medium truncate" style={{ fontSize: 13 }}>{f.name}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 1 }}>Excel Workbook (.xlsx)</div>
+                </div>
+                <div className="conn-file-actions">
+                  <button
+                    className="btn btn-ghost btn-icon"
+                    style={{ width: 28, height: 28 }}
+                    onClick={e => { e.stopPropagation(); handleSelectFile(f) }}
+                    title="Preview"
+                  >
+                    <Eye size={13} />
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-icon conn-file-delete-btn"
+                    style={{ width: 28, height: 28 }}
+                    onClick={e => { e.stopPropagation(); setFileToDelete(f.name); setDeleteFileDialogOpen(true) }}
+                    title="Delete file"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Right panel – spreadsheet preview */}
+      <div className="conn-preview">
+        {selectedFile ? (
+          <>
+            <div className="conn-preview-header">
+              <div className="flex items-center gap-2">
+                <FileSpreadsheet size={16} color="#217346" />
+                <span className="font-semibold" style={{ fontSize: 14 }}>{selectedFile.name}.xlsx</span>
+                <span className="badge badge-green">Preview</span>
+              </div>
+            </div>
+            <div className="conn-spreadsheet-wrapper">
+              {workbookLoading && (
+                <div className="conn-loading-overlay">
+                  <div className="conn-loading-card">
+                    <div className="spinner" style={{ width: 28, height: 28 }} />
+                    <span>Loading spreadsheet…</span>
+                  </div>
+                </div>
+              )}
+              <IgrSpreadsheet
+                ref={spreadsheetRef}
+                height="100%"
+                width="100%"
+              />
+            </div>
+          </>
+        ) : (
+          <div className="empty-state" style={{ height: '100%' }}>
+            <FileSpreadsheet size={48} style={{ opacity: 0.15 }} />
+            <h3>Select a file to preview</h3>
+            <p>Choose an Excel connection from the left panel to view its data in the spreadsheet viewer</p>
+          </div>
+        )}
+      </div>
+    </div>
+
+      {/* Delete file confirmation */}
+      <Dialog
+        open={deleteFileDialogOpen}
+        title="Delete File"
+        variant="danger"
+        icon={<Trash2 size={20} />}
+        onClose={() => setDeleteFileDialogOpen(false)}
+        actions={
+          <>
+            <button className="btn btn-secondary" onClick={() => setDeleteFileDialogOpen(false)}>
+              Cancel
+            </button>
+            <button
+              className="btn btn-danger"
+              onClick={handleDeleteFileConfirm}
+              disabled={deleteFilePending}
+            >
+              {deleteFilePending ? 'Deleting…' : 'Delete'}
+            </button>
+          </>
+        }
+      >
+        <p>Are you sure you want to delete <strong>{fileToDelete}</strong>?</p>
+        <p style={{ marginTop: 8, color: 'var(--text-muted)', fontSize: 13 }}>This action cannot be undone.</p>
+      </Dialog>
+    </>
+  )
+}
+
+--------------------
+
+using Microsoft.Extensions.Configuration;
+using Reveal.Sdk;
+using Reveal.Sdk.Data;
+using Reveal.Sdk.Data.Rest;
+
+namespace RevealSdk.Sdk
+{
+    public class DataSourceProvider : IRVDataSourceProvider
+    {
+        private readonly string _serverBaseUrl;
+
+        public DataSourceProvider(IConfiguration configuration)
+        {
+            _serverBaseUrl = configuration["ServerBaseUrl"] ?? "http://localhost:5111";
+        }
+        public Task<RVDataSourceItem> ChangeDataSourceItemAsync(IRVUserContext userContext,
+            string dashboardId, RVDataSourceItem dataSourceItem)
+        {
+            if (dataSourceItem is RVLocalFileDataSourceItem localDsi)
+            {
+                localDsi.Uri = $"local:/{localDsi.Id}.xlsx";
+            }
+
+            ChangeDataSourceAsync(userContext, dataSourceItem.DataSource);
+
+            return Task.FromResult(dataSourceItem);
+        }
+
+        public Task<RVDashboardDataSource> ChangeDataSourceAsync(IRVUserContext userContext, RVDashboardDataSource dataSource)
+        {
+            if (dataSource is RVWebResourceDataSource webResourceDataSource)
+            {
+                webResourceDataSource.UseAnonymousAuthentication = true;
+
+                if (dataSource.Id == "SampleExcel")
+                {
+                    // Legacy / sample datasource
+                    webResourceDataSource.Url = "https://download.infragistics.com/reveal/sampledata/SamplesIA.xlsx";
+                }
+                else if (!string.IsNullOrEmpty(dataSource.Id))
+                {
+                    // Dynamic Excel files uploaded to the Data folder
+                    webResourceDataSource.Url = $"{_serverBaseUrl}/data/{dataSource.Id}.xlsx";
+                }
+            }
+
+            return Task.FromResult(dataSource);
+        }
+    }
+}

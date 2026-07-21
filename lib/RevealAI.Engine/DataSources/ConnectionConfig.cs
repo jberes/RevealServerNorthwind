@@ -16,6 +16,7 @@ public sealed class ConnectionConfig
     public ConnectionType Type { get; set; } = ConnectionType.Rest;
 
     // --- Database connectors (SqlServer, Redshift, Postgres, MySql, Oracle, Snowflake, ...) ---
+    // For SQLite, Host/Schema/credentials are unused and Database holds the .sqlite file path.
     public string? Host { get; set; }
     public int? Port { get; set; }
     public string? Database { get; set; }
@@ -34,5 +35,6 @@ public sealed class ConnectionConfig
     /// <summary>True when this connector targets a tabular database (table-based dataset).</summary>
     public bool IsDatabase => Type is ConnectionType.SqlServer or ConnectionType.AzureSqlServer
         or ConnectionType.MySql or ConnectionType.PostgreSql or ConnectionType.Oracle
-        or ConnectionType.AmazonRedshift or ConnectionType.Snowflake or ConnectionType.GoogleBigQuery;
+        or ConnectionType.AmazonRedshift or ConnectionType.Snowflake or ConnectionType.GoogleBigQuery
+        or ConnectionType.Sqlite;
 }
