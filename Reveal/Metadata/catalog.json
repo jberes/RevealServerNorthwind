@@ -1,0 +1,229 @@
+{
+  "Datasources": [
+    {
+      "Id": "NorthwindSql",
+      "Provider": "SQLServer",
+      "Databases": [
+        {
+          "Name": "NorthwindCloud",
+          "DiscoveryMode": "Restricted",
+          "Tables": [
+            {
+              "Name": "dbo.All Invoices",
+              "Fields": [
+                {
+                  "Name": "ShipName"
+                },
+                {
+                  "Name": "ShipAddress"
+                },
+                {
+                  "Name": "ShipCity"
+                },
+                {
+                  "Name": "ShipRegion"
+                },
+                {
+                  "Name": "ShipPostalCode"
+                },
+                {
+                  "Name": "ShipCountry"
+                },
+                {
+                  "Name": "CustomerID"
+                },
+                {
+                  "Name": "CustomerName"
+                },
+                {
+                  "Name": "Address"
+                },
+                {
+                  "Name": "City"
+                },
+                {
+                  "Name": "Region"
+                },
+                {
+                  "Name": "PostalCode"
+                },
+                {
+                  "Name": "Country"
+                },
+                {
+                  "Name": "Salesperson"
+                },
+                {
+                  "Name": "OrderID"
+                },
+                {
+                  "Name": "OrderDate"
+                },
+                {
+                  "Name": "RequiredDate"
+                },
+                {
+                  "Name": "ShippedDate"
+                },
+                {
+                  "Name": "ShipperName"
+                },
+                {
+                  "Name": "ProductID"
+                },
+                {
+                  "Name": "ProductName"
+                },
+                {
+                  "Name": "UnitPrice"
+                },
+                {
+                  "Name": "Quantity"
+                },
+                {
+                  "Name": "Discount"
+                },
+                {
+                  "Name": "ExtendedPrice"
+                },
+                {
+                  "Name": "Freight"
+                }
+              ]
+            },
+            {
+              "Name": "dbo.All Orders",
+              "Fields": [
+                {
+                  "Name": "OrderID"
+                },
+                {
+                  "Name": "CustomerID"
+                },
+                {
+                  "Name": "EmployeeID"
+                },
+                {
+                  "Name": "OrderDate"
+                },
+                {
+                  "Name": "RequiredDate"
+                },
+                {
+                  "Name": "ShippedDate"
+                },
+                {
+                  "Name": "ShipVia"
+                },
+                {
+                  "Name": "Freight"
+                },
+                {
+                  "Name": "ShipName"
+                },
+                {
+                  "Name": "ShipAddress"
+                },
+                {
+                  "Name": "ShipCity"
+                },
+                {
+                  "Name": "ShipRegion"
+                },
+                {
+                  "Name": "ShipPostalCode"
+                },
+                {
+                  "Name": "ShipCountry"
+                },
+                {
+                  "Name": "CompanyName"
+                },
+                {
+                  "Name": "Address"
+                },
+                {
+                  "Name": "City"
+                },
+                {
+                  "Name": "Region"
+                },
+                {
+                  "Name": "PostalCode"
+                },
+                {
+                  "Name": "Country"
+                }
+              ]
+            },
+            {
+              "Name": "dbo.EmployeeDetailsExtended",
+              "Fields": [
+                {
+                  "Name": "EmployeeID"
+                },
+                {
+                  "Name": "LastName"
+                },
+                {
+                  "Name": "FirstName"
+                },
+                {
+                  "Name": "Title"
+                },
+                {
+                  "Name": "TitleOfCourtesy"
+                },
+                {
+                  "Name": "BirthDate"
+                },
+                {
+                  "Name": "HireDate"
+                },
+                {
+                  "Name": "Address"
+                },
+                {
+                  "Name": "City"
+                },
+                {
+                  "Name": "Region"
+                },
+                {
+                  "Name": "PostalCode"
+                },
+                {
+                  "Name": "Country"
+                },
+                {
+                  "Name": "HomePhone"
+                },
+                {
+                  "Name": "Extension"
+                },
+                {
+                  "Name": "Notes"
+                },
+                {
+                  "Name": "ReportsTo"
+                },
+                {
+                  "Name": "PhotoPath"
+                },
+                {
+                  "Name": "TotalOrders"
+                },
+                {
+                  "Name": "TotalSales"
+                },
+                {
+                  "Name": "TotalCustomers"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

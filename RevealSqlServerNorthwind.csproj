@@ -1,0 +1,53 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>AnyCPU;x86;x64</Platforms>
+    <!-- The vendored RevealAI.Engine source lives under lib\; it builds as its own
+         project (ProjectReference below), so keep it out of THIS project's globs
+         to avoid double-compiling it. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);lib\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Reveal.Sdk.AI" Version="1.4.107" />
+    <PackageReference Include="Reveal.Sdk.AI.AspNetCore" Version="1.4.107" />
+    <PackageReference Include="Reveal.Sdk.AI.OpenAI" Version="1.4.107" />
+    <PackageReference Include="Reveal.Sdk.AspNetCore" Version="2.1.0" />
+    <PackageReference Include="Reveal.Sdk.Data.Microsoft.SqlServer" Version="2.1.0" />
+    <PackageReference Include="Reveal.Sdk.Dom" Version="0.1.672-beta" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.4" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="10.2.1" />
+  </ItemGroup>
+
+  <!-- Vendored copy of RevealAI.Engine 0.1.2 (the published NuGet is only 0.1.1,
+       which lacks the AddRevealAiEngine(LlmOptions) API). Building it as a project
+       reference keeps `dotnet publish` / the Azure deploy self-contained. -->
+  <ItemGroup>
+    <ProjectReference Include="lib\RevealAI.Engine\RevealAI.Engine.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Dashboards\" />
+  </ItemGroup>
+
+<ItemGroup>
+  <None Include="Dashboards\**\*" CopyToOutputDirectory="Always" />
+  <None Include="Images\**\*" CopyToOutputDirectory="Always" />
+</ItemGroup>
+
+<ItemGroup>
+  <None Include=".github\copilot-instructions.md" />
+</ItemGroup>
+
+<ItemGroup>
+  <None Update="Dashboards\Manufacturing.rdash">
+    <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+  </None>
+</ItemGroup>
+
+
+</Project>

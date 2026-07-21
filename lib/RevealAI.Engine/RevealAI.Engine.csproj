@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+
+    <!-- NuGet package metadata (so this can be packed and embedded in another product). -->
+    <PackageId>RevealAI.Engine</PackageId>
+    <Version>0.1.2</Version>
+    <Authors>Infragistics</Authors>
+    <Description>AI-assisted Reveal dashboard generation: schema profiling, visualization recommendation (heuristic + LLM), and a deterministic spec-to-RDASH compiler. Reference this and call DashboardAiService. Connection + LLM key are supplied by the host app.</Description>
+    <PackageTags>reveal;rdash;dashboard;ai;visualization</PackageTags>
+  </PropertyGroup>
+
+  <!--
+    Dependency versions are LOWER BOUNDS aligned to the Reveal SDK 2.0.0 stack so this library
+    embeds without forcing host apps to upgrade (NuGet picks the host's higher version if any).
+  -->
+  <ItemGroup>
+    <PackageReference Include="Reveal.Sdk.Dom" Version="0.1.668-beta" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>
