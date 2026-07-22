@@ -44,6 +44,9 @@
   <!-- Folder-per-source layout: every source's SQLite DB (+ workbook/selection files)
        lives under Data/{sourceId}/ and ships to the output/publish folder. -->
   <None Include="Data\**\*" CopyToOutputDirectory="PreserveNewest" />
+  <!-- AI prompt context (RevealAI:ContextManager) — permanent + keyword-triggered
+       guidance injected into chat/dashboard generation. Loaded once at startup. -->
+  <None Include="context.json" CopyToOutputDirectory="PreserveNewest" />
 </ItemGroup>
 
 <ItemGroup>

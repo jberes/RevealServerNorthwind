@@ -1,0 +1,14 @@
+{
+  "permanent": [
+    "Compute every number from the real data in the datasource. Never invent values, fields, or tables.",
+    "Unless explicitly asked for, only include a date filter when generating new dashboards.",
+    "Match chart types to the data: line charts for time series, horizontal bar charts when category labels are long, and never a pie or doughnut chart with more than 5 slices.",
+    "Never group or aggregate by identifier columns (IDs, keys, codes) or high-cardinality dimensions."
+  ],
+  "dynamic": {
+    "dashboard": "When designing a full dashboard, PROFILE THE DATA FIRST: determine which columns are measures vs dimensions vs dates vs identifiers and how many distinct values each dimension has, and only propose metrics the data can truly support. Then design one screen in three tiers. Tier 1: 3-5 KPI visualizations (counts, averages, totals) and at least one health or exception metric such as % late, % missing, or % over a threshold. Tier 2: 4-6 charts - one time trend if a date column exists, plus top-N breakdowns of the 2-4 most decision-relevant dimensions. Tier 3: one detail grid of exception rows (late, overdue, outliers) sorted worst-first. SKIP high-cardinality dimensions, identifier columns, near-duplicate columns, and any visualization that would not change a decision.",
+    "report": "When designing a full report, PROFILE THE DATA FIRST: determine which columns are measures vs dimensions vs dates vs identifiers, and only propose metrics the data can truly support. Structure it in tiers: leading KPI visualizations (including one health/exception metric), then 4-6 decision-relevant charts (a time trend if a date column exists, top-N breakdowns of the most important dimensions), then one detail grid of exception rows sorted worst-first. Skip identifier columns, high-cardinality dimensions, and redundant visualizations.",
+    "kpi": "When asked to generate a KPI, use the kpitime or kpitarget visualizations, depending on the actual data being displayed.",
+    "GMROI": "The GMROI formula is: GMROI = Gross Margin / Average Inventory Cost, where Gross Margin = Total Sales - Cost of Goods Sold (COGS) and Average Inventory Cost = (Beginning Inventory Cost + Ending Inventory Cost) / 2."
+  }
+}
