@@ -366,3 +366,6 @@ FodyWeavers.xsd
 # documents the shape. Copy the template to appsettings.json and fill in your keys.
 appsettings.json
 appsettings.Development.json
+
+# Runtime share-link registry (regenerated; not source)
+Reveal/shares.json
