@@ -1,8 +1,34 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Data.Sqlite;
 
 namespace RevealSdk.Services
 {
+    /// <summary>
+    /// User-authored AI metadata for one field (metadata-catalog schema reference:
+    /// https://help.revealbi.io/ai/metadata-catalog/#schema-reference).
+    /// </summary>
+    public sealed class FieldMetadata
+    {
+        [JsonPropertyName("alias")] public string? Alias { get; set; }
+        [JsonPropertyName("description")] public string? Description { get; set; }
+
+        [JsonIgnore]
+        public bool IsEmpty => string.IsNullOrWhiteSpace(Alias) && string.IsNullOrWhiteSpace(Description);
+    }
+
+    /// <summary>User-authored AI metadata for one table.</summary>
+    public sealed class TableMetadata
+    {
+        [JsonPropertyName("description")] public string? Description { get; set; }
+        [JsonPropertyName("fields")] public Dictionary<string, FieldMetadata> Fields { get; set; }
+            = new(StringComparer.OrdinalIgnoreCase);
+
+        [JsonIgnore]
+        public bool IsEmpty => string.IsNullOrWhiteSpace(Description)
+            && (Fields.Count == 0 || Fields.Values.All(f => f.IsEmpty));
+    }
+
     /// <summary>
     /// Owns which tables/views each source exposes to the Reveal AI assistant.
     ///
@@ -16,6 +42,7 @@ namespace RevealSdk.Services
     public sealed class AiCatalogService
     {
         private const string SelectionFileName = "ai-selection.json";
+        private const string MetadataFileName = "ai-metadata.json";
 
         private readonly SourceRegistry _registry;
         private readonly string _catalogPath;
@@ -86,6 +113,57 @@ namespace RevealSdk.Services
             SetSelection(sourceId, tables);
         }
 
+        // ---- user-authored table/field metadata (survives every regeneration:
+        // ---- it lives in Data/{sourceId}/ai-metadata.json and is merged into
+        // ---- catalog.json on every rebuild) ------------------------------------
+
+        /// <summary>All table metadata overrides for a source (empty when none).</summary>
+        public Dictionary<string, TableMetadata> GetMetadataOverrides(string sourceId)
+        {
+            var src = _registry.Find(sourceId);
+            if (src is null) return new(StringComparer.OrdinalIgnoreCase);
+            var file = MetadataPath(src);
+            if (!File.Exists(file)) return new(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var parsed = JsonSerializer.Deserialize<Dictionary<string, TableMetadata>>(
+                    File.ReadAllText(file),
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                return parsed is null
+                    ? new(StringComparer.OrdinalIgnoreCase)
+                    : new Dictionary<string, TableMetadata>(parsed, StringComparer.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return new(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        /// <summary>
+        /// Persist the metadata for one table (removing it when empty) and rebuild
+        /// catalog.json so the Description/Alias flow into the AI's Restricted catalog.
+        /// </summary>
+        public void SetTableMetadata(string sourceId, string table, TableMetadata metadata)
+        {
+            var src = _registry.Find(sourceId)
+                      ?? throw new DirectoryNotFoundException($"Unknown source '{sourceId}'.");
+
+            lock (_lock)
+            {
+                var all = GetMetadataOverrides(sourceId);
+                // Drop empty field entries; drop the table entirely when nothing remains.
+                metadata.Fields = metadata.Fields
+                    .Where(kv => !kv.Value.IsEmpty)
+                    .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+                if (metadata.IsEmpty) all.Remove(table);
+                else all[table] = metadata;
+
+                File.WriteAllText(MetadataPath(src), JsonSerializer.Serialize(all,
+                    new JsonSerializerOptions { WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull }));
+            }
+            RebuildCatalogJson();
+        }
+
         /// <summary>
         /// Rewrite catalog.json from every source's persisted selection: one Restricted
         /// SQLITE datasource per source with a non-empty selection. The datasource Id AND
@@ -111,6 +189,11 @@ namespace RevealSdk.Services
                         columns = new(StringComparer.OrdinalIgnoreCase);
                     }
 
+                    // Merge user-authored table/field metadata (descriptions, aliases)
+                    // into the catalog per the schema reference — this is what makes the
+                    // custom metadata influence the AI's generated metadata.
+                    var overrides = GetMetadataOverrides(src.SourceId);
+
                     datasources.Add(new
                     {
                         Id = src.SourceId,
@@ -121,12 +204,28 @@ namespace RevealSdk.Services
                             {
                                 Name = Path.GetFileNameWithoutExtension(src.SqlitePath),
                                 DiscoveryMode = "Restricted",
-                                Tables = selection.Select(t => new
+                                Tables = selection.Select(t =>
                                 {
-                                    Name = t,
-                                    Fields = (columns.TryGetValue(t, out var cols) ? cols : new List<string>())
-                                        .Select(c => new { Name = c })
-                                        .ToArray()
+                                    overrides.TryGetValue(t, out var tableMeta);
+                                    return (object)new
+                                    {
+                                        Name = t,
+                                        Description = string.IsNullOrWhiteSpace(tableMeta?.Description)
+                                            ? null : tableMeta!.Description,
+                                        Fields = (columns.TryGetValue(t, out var cols) ? cols : new List<string>())
+                                            .Select(c =>
+                                            {
+                                                FieldMetadata? fm = null;
+                                                tableMeta?.Fields.TryGetValue(c, out fm);
+                                                return (object)new
+                                                {
+                                                    Name = c,
+                                                    Alias = string.IsNullOrWhiteSpace(fm?.Alias) ? null : fm!.Alias,
+                                                    Description = string.IsNullOrWhiteSpace(fm?.Description) ? null : fm!.Description
+                                                };
+                                            })
+                                            .ToArray()
+                                    };
                                 }).ToArray()
                             }
                         }
@@ -135,7 +234,11 @@ namespace RevealSdk.Services
 
                 File.WriteAllText(_catalogPath, JsonSerializer.Serialize(
                     new { Datasources = datasources },
-                    new JsonSerializerOptions { WriteIndented = true }));
+                    new JsonSerializerOptions
+                    {
+                        WriteIndented = true,
+                        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+                    }));
                 Console.WriteLine($"[AI Catalog] catalog.json rebuilt: {datasources.Count} datasource(s).");
             }
         }
@@ -179,5 +282,8 @@ namespace RevealSdk.Services
 
         private static string SelectionPath(SourceInfo src) =>
             Path.Combine(Path.GetDirectoryName(src.SqlitePath)!, SelectionFileName);
+
+        private static string MetadataPath(SourceInfo src) =>
+            Path.Combine(Path.GetDirectoryName(src.SqlitePath)!, MetadataFileName);
     }
 }

@@ -48,35 +48,6 @@
                   "Name": "Date"
                 }
               ]
-            },
-            {
-              "Name": "Social_Media",
-              "Fields": [
-                {
-                  "Name": "Date"
-                },
-                {
-                  "Name": "Platform"
-                },
-                {
-                  "Name": "Impressions"
-                },
-                {
-                  "Name": "Engagement"
-                },
-                {
-                  "Name": "CTR"
-                },
-                {
-                  "Name": "CPC"
-                },
-                {
-                  "Name": "Conversions"
-                },
-                {
-                  "Name": "Campaign"
-                }
-              ]
             }
           ]
         }
@@ -92,6 +63,7 @@
           "Tables": [
             {
               "Name": "All Invoices",
+              "Description": "One row per invoice line: customer, product, salesperson and revenue for every shipped order.",
               "Fields": [
                 {
                   "Name": "ShipName"
@@ -133,7 +105,8 @@
                   "Name": "Country:1"
                 },
                 {
-                  "Name": "Salesperson"
+                  "Name": "Salesperson",
+                  "Description": "Full name of the employee who took the order."
                 },
                 {
                   "Name": "OrderID"
@@ -166,7 +139,9 @@
                   "Name": "Discount"
                 },
                 {
-                  "Name": "ExtendedPrice"
+                  "Name": "ExtendedPrice",
+                  "Alias": "Revenue",
+                  "Description": "Line revenue after discount (UnitPrice x Quantity x (1-Discount))."
                 },
                 {
                   "Name": "Freight"
@@ -300,44 +275,6 @@
                 },
                 {
                   "Name": "TotalCustomers"
-                }
-              ]
-            },
-            {
-              "Name": "Alphabetical list of products",
-              "Fields": [
-                {
-                  "Name": "ProductID"
-                },
-                {
-                  "Name": "ProductName"
-                },
-                {
-                  "Name": "SupplierID"
-                },
-                {
-                  "Name": "CategoryID"
-                },
-                {
-                  "Name": "QuantityPerUnit"
-                },
-                {
-                  "Name": "UnitPrice"
-                },
-                {
-                  "Name": "UnitsInStock"
-                },
-                {
-                  "Name": "UnitsOnOrder"
-                },
-                {
-                  "Name": "ReorderLevel"
-                },
-                {
-                  "Name": "Discontinued"
-                },
-                {
-                  "Name": "CategoryName"
                 }
               ]
             }

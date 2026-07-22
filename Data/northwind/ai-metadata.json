@@ -1,0 +1,14 @@
+{
+  "All Invoices": {
+    "description": "One row per invoice line: customer, product, salesperson and revenue for every shipped order.",
+    "fields": {
+      "ExtendedPrice": {
+        "alias": "Revenue",
+        "description": "Line revenue after discount (UnitPrice x Quantity x (1-Discount))."
+      },
+      "Salesperson": {
+        "description": "Full name of the employee who took the order."
+      }
+    }
+  }
+}

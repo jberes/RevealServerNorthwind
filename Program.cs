@@ -957,7 +957,13 @@ app.MapPut("/ai/catalog", async (AiCatalogUpdateRequest req, HttpContext http,
             // logged — a bare discarded Task would swallow them silently.
             _ = Task.Run(async () =>
             {
-                try { await metadataService.RegenerateMetadataAsync(src.SourceId, null, whitelist, CancellationToken.None); }
+                try
+                {
+                    await metadataService.RegenerateMetadataAsync(src.SourceId, null, whitelist, CancellationToken.None);
+                    // Re-apply user-authored catalog metadata (descriptions/aliases)
+                    // to the freshly generated per-table files.
+                    await metadataManager.Reload();
+                }
                 catch (Exception ex) { Console.WriteLine($"[AI Catalog] metadata regeneration for '{src.SourceId}' FAILED: {ex}"); }
             });
         }
@@ -978,6 +984,99 @@ app.MapPut("/ai/catalog", async (AiCatalogUpdateRequest req, HttpContext http,
         return Results.Problem($"Error updating AI catalog: {ex.Message}");
     }
 }).Produces(StatusCodes.Status202Accepted)
+  .Produces(StatusCodes.Status409Conflict)
+  .ProducesProblem(StatusCodes.Status500InternalServerError);
+
+// ---------------------------------------------------------------------------
+// Custom AI metadata (#schema-reference): user-authored table descriptions and
+// per-field alias/description. Stored per source at Data/{sourceId}/ai-metadata.json
+// (so it SURVIVES every regeneration), merged into catalog.json on rebuild, and
+// the metadata store is regenerated so the AI picks it up.
+// ---------------------------------------------------------------------------
+
+// GET /ai/metadata-overrides/{table} — current metadata for one table (active source).
+app.MapGet("/ai/metadata-overrides/{table}", (string table, HttpContext http) =>
+{
+    try
+    {
+        var src = ResolveSource(http);
+        var all = aiCatalog.GetMetadataOverrides(src.SourceId);
+        all.TryGetValue(table, out var meta);
+        var columns = AiCatalogService.DiscoverColumns(src.SqlitePath, new[] { table })
+            .TryGetValue(table, out var cols) ? cols : new List<string>();
+        return Results.Ok(new
+        {
+            sourceId = src.SourceId,
+            table,
+            columns,
+            description = meta?.Description,
+            fields = meta?.Fields ?? new Dictionary<string, FieldMetadata>(StringComparer.OrdinalIgnoreCase)
+        });
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error reading metadata overrides: {ex.Message}");
+        return Results.Problem("Error reading metadata overrides.");
+    }
+}).Produces(StatusCodes.Status200OK)
+  .ProducesProblem(StatusCodes.Status500InternalServerError);
+
+// PUT /ai/metadata-overrides/{table} — save the metadata, rebuild the catalog,
+// reload the manager, and regenerate the source's metadata store.
+app.MapPut("/ai/metadata-overrides/{table}", async (string table, TableMetadata body, HttpContext http,
+    Reveal.Sdk.AI.AspNetCore.Services.IMetadataService metadataService,
+    Reveal.Sdk.AI.Metadata.IMetadataManager metadataManager,
+    SuggestedQuestionsService questions) =>
+{
+    try
+    {
+        var src = ResolveSource(http);
+        if (!AiCatalogService.ListObjects(src.SqlitePath).Contains(table))
+            return Results.NotFound(new { message = $"Table '{table}' was not found in '{src.SourceId}'." });
+
+        if (metadataService.IsGenerationInProgress)
+            return Results.Conflict(new { message = "Metadata generation is already running — try again shortly." });
+
+        aiCatalog.SetTableMetadata(src.SourceId, table, body ?? new TableMetadata());
+        await metadataManager.Reload();
+
+        // Regenerate only when the table is part of the AI selection — otherwise the
+        // metadata is stored and will apply when the table is enabled for the AI.
+        var selection = aiCatalog.GetSelection(src.SourceId);
+        var regenerating = selection.Contains(table, StringComparer.OrdinalIgnoreCase);
+        if (regenerating)
+        {
+            var whitelist = selection
+                .Select(t => new Reveal.Sdk.AI.Metadata.MetadataWhitelistItem
+                {
+                    Database = Path.GetFileNameWithoutExtension(src.SqlitePath),
+                    Table = t
+                })
+                .ToList();
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await metadataService.RegenerateMetadataAsync(src.SourceId, null, whitelist, CancellationToken.None);
+                    // Regeneration writes fresh per-table files WITHOUT the catalog
+                    // overrides; a reload re-applies them to the files (the chat read
+                    // path also merges them in-memory, this keeps disk consistent).
+                    await metadataManager.Reload();
+                }
+                catch (Exception ex) { Console.WriteLine($"[AI Metadata] regeneration for '{src.SourceId}' FAILED: {ex}"); }
+            });
+            questions.Invalidate(src.SourceId);
+        }
+
+        return Results.Accepted("/api/reveal/ai/metadata/status", new { sourceId = src.SourceId, table, regenerating });
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error saving metadata overrides: {ex.Message}");
+        return Results.Problem("Error saving metadata overrides.");
+    }
+}).Produces(StatusCodes.Status202Accepted)
+  .Produces(StatusCodes.Status404NotFound)
   .Produces(StatusCodes.Status409Conflict)
   .ProducesProblem(StatusCodes.Status500InternalServerError);
 
