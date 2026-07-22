@@ -369,3 +369,6 @@ appsettings.Development.json
 
 # Runtime share-link registry (regenerated; not source)
 Reveal/shares.json
+
+# Local design-system reference (never commit)
+Reveal Design System/
