@@ -111,6 +111,52 @@ namespace RevealSdk.Services
                 for (int i = 0; i < width; i++)
                     if (kinds[i] == ColKind.Unknown) kinds[i] = ColKind.Text; // all-null column
 
+                // Second chance for columns demoted to TEXT by a few bad apples: real
+                // worksheets mix genuine date cells with the odd unparsable string —
+                // e.g. an impossible "2/29/2022" that Excel itself left as text. If
+                // ≥95% of the non-null values are dates (DateTime cells or
+                // date-shaped strings) and none are numeric/bool, treat the column as
+                // a date column and import the failures as NULL (with a warning).
+                for (int i = 0; i < width; i++)
+                {
+                    if (kinds[i] != ColKind.Text) continue;
+                    int dateOk = 0, failed = 0;
+                    var badSamples = new List<string>();
+                    var disqualified = false;
+                    var anyTime = false;
+                    foreach (var row in dataRows)
+                    {
+                        var v = i < row.Length ? row[i] : null;
+                        switch (v)
+                        {
+                            case null:
+                                break;
+                            case DateTime cell:
+                                dateOk++;
+                                if (cell.TimeOfDay != TimeSpan.Zero) anyTime = true;
+                                break;
+                            case string s when TryParseDateString(s, out var dt):
+                                dateOk++;
+                                if (dt.TimeOfDay != TimeSpan.Zero) anyTime = true;
+                                break;
+                            case string s:
+                                failed++;
+                                if (badSamples.Count < 3) badSamples.Add(s);
+                                break;
+                            default:
+                                disqualified = true; // numeric/bool mixed in — genuinely not a date column
+                                break;
+                        }
+                        if (disqualified) break;
+                    }
+                    var total = dateOk + failed;
+                    if (disqualified || total == 0 || dateOk < 1 || (double)dateOk / total < 0.95) continue;
+                    kinds[i] = anyTime ? ColKind.DateTime : ColKind.DateOnly;
+                    if (failed > 0)
+                        warnings.Add($"Sheet '{sheetName}', column '{colNames[i]}': {failed} value(s) are not valid dates " +
+                                     $"and were imported as empty (e.g. \"{string.Join("\", \"", badSamples)}\").");
+                }
+
                 // Ragged-row warning (once per sheet).
                 if (dataRows.Any(r => r.Count(c => c is not null) > width))
                     warnings.Add($"Sheet '{sheetName}': some rows have more cells than the header — extras ignored.");
@@ -185,10 +231,29 @@ namespace RevealSdk.Services
             float f => f == Math.Truncate(f) ? ColKind.Integer : ColKind.Real,
             decimal m => m == Math.Truncate(m) ? ColKind.Integer : ColKind.Real,
             int or long or short or byte => ColKind.Integer,
-            // A numeric-LOOKING string does NOT promote — strings force TEXT
-            // (protects zip codes / phone numbers / leading zeros).
+            // Date-SHAPED strings promote to date columns (worksheets frequently store
+            // dates as text). The format whitelist is strict, so numeric-looking
+            // strings (zip codes, phone numbers) still stay TEXT.
+            string s when TryParseDateString(s, out var sdt) =>
+                sdt.TimeOfDay == TimeSpan.Zero ? ColKind.DateOnly : ColKind.DateTime,
             _ => ColKind.Text
         };
+
+        // Unambiguous / conventional formats only — deliberately NO loose
+        // DateTime.TryParse, which would promote strings like "March" or "3.14".
+        private static readonly string[] DateFormats =
+        {
+            "yyyy-MM-dd", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-ddTHH:mm:ss", "yyyy-MM-ddTHH:mm:ss.fff",
+            "yyyy/MM/dd", "yyyy/MM/dd HH:mm:ss",
+            "M/d/yyyy", "M/d/yyyy H:mm", "M/d/yyyy H:mm:ss", "M/d/yyyy h:mm:ss tt", "M/d/yyyy h:mm tt",
+            "d-MMM-yyyy", "d-MMM-yy", "MMM d, yyyy"
+        };
+
+        private static bool TryParseDateString(string s, out DateTime result)
+        {
+            return DateTime.TryParseExact(s.Trim(), DateFormats, CultureInfo.InvariantCulture,
+                DateTimeStyles.None, out result);
+        }
 
         private static ColKind Merge(ColKind a, ColKind b)
         {
@@ -223,9 +288,12 @@ namespace RevealSdk.Services
                 case ColKind.DateOnly:
                     // Excel dates are timezone-naive — treat as UTC so the stored epoch
                     // round-trips Reveal's strftime('%s', col, 'unixepoch') exactly.
-                    return v is DateTime dt
-                        ? new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc)).ToUnixTimeSeconds()
-                        : null;
+                    // Handles both real DateTime cells and date-shaped text cells.
+                    if (v is DateTime dt)
+                        return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc)).ToUnixTimeSeconds();
+                    if (v is string ds && TryParseDateString(ds, out var parsed))
+                        return new DateTimeOffset(DateTime.SpecifyKind(parsed, DateTimeKind.Utc)).ToUnixTimeSeconds();
+                    return null;
                 case ColKind.Integer:
                 case ColKind.Bool:
                     return v switch
