@@ -22,32 +22,54 @@ public sealed class OpenAiClient : ILlmClient
 
     public LlmProvider Provider => LlmProvider.OpenAI;
 
+    // Reasoning-family models (gpt-5*, o*) reject any non-default temperature with a
+    // 400. Once a model refuses it, remember and stop sending it for this process.
+    private static volatile bool _omitTemperature;
+
     public async Task<string> CompleteAsync(string systemPrompt, string userPrompt, CancellationToken ct = default)
     {
+        var (status, raw) = await SendAsync(systemPrompt, userPrompt, includeTemperature: !_omitTemperature, ct);
+
+        if (status == 400 && !_omitTemperature && raw.Contains("temperature", StringComparison.OrdinalIgnoreCase))
+        {
+            _omitTemperature = true;
+            (status, raw) = await SendAsync(systemPrompt, userPrompt, includeTemperature: false, ct);
+        }
+
+        if (status is < 200 or >= 300)
+            throw new HttpRequestException($"OpenAI API error {status}: {raw}");
+
+        using var doc = JsonDocument.Parse(raw);
+        return doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
+    }
+
+    private async Task<(int Status, string Raw)> SendAsync(
+        string systemPrompt, string userPrompt, bool includeTemperature, CancellationToken ct)
+    {
         var baseUrl = string.IsNullOrWhiteSpace(_options.BaseUrl) ? "https://api.openai.com/v1" : _options.BaseUrl!.TrimEnd('/');
+
+        var payload = new Dictionary<string, object>
+        {
+            ["model"] = _options.ResolvedModel,
+            ["response_format"] = new { type = "json_object" },
+            ["messages"] = new[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user", content = userPrompt }
+            }
+        };
+        if (includeTemperature)
+            payload["temperature"] = _options.Temperature;
+
         var request = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/chat/completions")
         {
-            Content = JsonContent.Create(new
-            {
-                model = _options.ResolvedModel,
-                temperature = _options.Temperature,
-                response_format = new { type = "json_object" },
-                messages = new[]
-                {
-                    new { role = "system", content = systemPrompt },
-                    new { role = "user", content = userPrompt }
-                }
-            })
+            Content = JsonContent.Create(payload)
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer",
             _options.ApiKey ?? throw new InvalidOperationException("Llm:ApiKey is required for OpenAI."));
 
         using var response = await _http.SendAsync(request, ct);
         var raw = await response.Content.ReadAsStringAsync(ct);
-        if (!response.IsSuccessStatusCode)
-            throw new HttpRequestException($"OpenAI API error {(int)response.StatusCode}: {raw}");
-
-        using var doc = JsonDocument.Parse(raw);
-        return doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
+        return ((int)response.StatusCode, raw);
     }
 }

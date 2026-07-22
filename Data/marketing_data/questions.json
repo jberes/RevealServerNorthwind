@@ -1,12 +1,12 @@
 {
-  "GeneratedAt": "2026-07-22T02:18:41.4211455+00:00",
+  "GeneratedAt": "2026-07-22T14:37:51.1762046+00:00",
   "Source": "llm",
   "Questions": [
-    "What is the total number of recipients?",
+    "What was the total number of recipients last month?",
     "Which campaign category had the highest open rate?",
     "Show the trend of actual opens over time.",
-    "How many emails bounced last month?",
-    "Break down click rates by campaign category.",
-    "List campaigns with the most unsubscribes."
+    "Break down clicks by campaign category.",
+    "How many users unsubscribed this year?",
+    "List top 5 campaigns by click rate."
   ]
 }

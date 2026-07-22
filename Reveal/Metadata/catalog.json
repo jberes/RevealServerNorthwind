@@ -12,19 +12,27 @@
               "Name": "Email_Marketing_Campaign",
               "Fields": [
                 {
-                  "Name": "Category"
+                  "Name": "Category",
+                  "Alias": "Campaign Type",
+                  "Description": "This is the category of the campaign, like Email, Launch, etc."
                 },
                 {
-                  "Name": "Recipients"
+                  "Name": "Recipients",
+                  "Description": "Total number of people this campaign targetted"
                 },
                 {
-                  "Name": "Bounced"
+                  "Name": "Bounced",
+                  "Alias": "Bounced Items",
+                  "Description": "Total number of bounced emails, etc."
                 },
                 {
-                  "Name": "Bounce"
+                  "Name": "Bounce",
+                  "Alias": "Bounce Rate",
+                  "Description": "Bounce Rate"
                 },
                 {
-                  "Name": "Opened"
+                  "Name": "Opened",
+                  "Alias": "Open Rate"
                 },
                 {
                   "Name": "Implied_Opens"
@@ -33,16 +41,21 @@
                   "Name": "Actual_Opens"
                 },
                 {
-                  "Name": "Open"
+                  "Name": "Open",
+                  "Alias": "Open Rate",
+                  "Description": "Open Rate of the Campaign Type"
                 },
                 {
-                  "Name": "Clicked"
+                  "Name": "Clicked",
+                  "Alias": "Items Clicked"
                 },
                 {
-                  "Name": "Click"
+                  "Name": "Click",
+                  "Alias": "Click Rate"
                 },
                 {
-                  "Name": "Unsubscribed"
+                  "Name": "Unsubscribed",
+                  "Description": "Total number of Unsubscribed from this Campaign"
                 },
                 {
                   "Name": "Date"

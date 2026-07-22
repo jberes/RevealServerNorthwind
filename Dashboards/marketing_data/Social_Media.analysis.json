@@ -1,0 +1,182 @@
+{
+  "RdashLastWriteUtc": "2026-07-22T02:28:51.1609632Z",
+  "Result": {
+    "DashboardName": "Social_Media",
+    "SourceId": "marketing_data",
+    "Title": "Social Media Campaigns",
+    "Filters": [],
+    "Visualizations": [
+      {
+        "Id": "dd370a99-8053-4cc0-9b50-4695416a7d5a",
+        "Title": "Social Media Campaign Data",
+        "ChartType": "Grid",
+        "Table": "Social_Media",
+        "Fields": [
+          {
+            "Role": "Columns",
+            "Name": "Date",
+            "Aggregation": null,
+            "Sorting": null
+          },
+          {
+            "Role": "Columns",
+            "Name": "Platform",
+            "Aggregation": null,
+            "Sorting": null
+          },
+          {
+            "Role": "Columns",
+            "Name": "Campaign",
+            "Aggregation": null,
+            "Sorting": null
+          },
+          {
+            "Role": "Columns",
+            "Name": "Impressions",
+            "Aggregation": null,
+            "Sorting": null
+          },
+          {
+            "Role": "Columns",
+            "Name": "Engagement",
+            "Aggregation": null,
+            "Sorting": null
+          },
+          {
+            "Role": "Columns",
+            "Name": "CTR",
+            "Aggregation": null,
+            "Sorting": null
+          },
+          {
+            "Role": "Columns",
+            "Name": "CPC",
+            "Aggregation": null,
+            "Sorting": null
+          },
+          {
+            "Role": "Columns",
+            "Name": "Conversions",
+            "Aggregation": null,
+            "Sorting": null
+          }
+        ],
+        "HiddenFields": [],
+        "FilterFields": []
+      },
+      {
+        "Id": "224c0e97-bbb1-48c7-98e1-b3ee12cfb061",
+        "Title": "Impressions by Platform",
+        "ChartType": "Column",
+        "Table": "Social_Media",
+        "Fields": [
+          {
+            "Role": "Rows",
+            "Name": "Platform",
+            "Aggregation": null,
+            "Sorting": null
+          },
+          {
+            "Role": "Values",
+            "Name": "Impressions",
+            "Aggregation": "Sum",
+            "Sorting": null
+          }
+        ],
+        "HiddenFields": [],
+        "FilterFields": []
+      },
+      {
+        "Id": "79b03ccc-dfaf-433e-be38-993fbeb2e558",
+        "Title": "Engagement by Campaign",
+        "ChartType": "Bar",
+        "Table": "Social_Media",
+        "Fields": [
+          {
+            "Role": "Rows",
+            "Name": "Campaign",
+            "Aggregation": null,
+            "Sorting": null
+          },
+          {
+            "Role": "Values",
+            "Name": "Engagement",
+            "Aggregation": "Sum",
+            "Sorting": null
+          }
+        ],
+        "HiddenFields": [],
+        "FilterFields": []
+      },
+      {
+        "Id": "298ad075-5354-4f9b-9784-6e75134adc94",
+        "Title": "Conversions Over Time",
+        "ChartType": "Line",
+        "Table": "Social_Media",
+        "Fields": [
+          {
+            "Role": "Rows",
+            "Name": "Date",
+            "Aggregation": null,
+            "Sorting": null
+          },
+          {
+            "Role": "Values",
+            "Name": "Conversions",
+            "Aggregation": "Sum",
+            "Sorting": null
+          }
+        ],
+        "HiddenFields": [],
+        "FilterFields": []
+      },
+      {
+        "Id": "7d3d7e4e-fb8c-428e-a441-8bc85ecce641",
+        "Title": "CTR by Platform",
+        "ChartType": "Doughnut",
+        "Table": "Social_Media",
+        "Fields": [
+          {
+            "Role": "Rows",
+            "Name": "Platform",
+            "Aggregation": null,
+            "Sorting": null
+          },
+          {
+            "Role": "Value",
+            "Name": "CTR",
+            "Aggregation": "Avg",
+            "Sorting": null
+          }
+        ],
+        "HiddenFields": [],
+        "FilterFields": []
+      },
+      {
+        "Id": "f2245626-f6c3-4c0b-be1a-9e1a484df1a1",
+        "Title": "CPC by Campaign",
+        "ChartType": "Doughnut",
+        "Table": "Social_Media",
+        "Fields": [
+          {
+            "Role": "Rows",
+            "Name": "Campaign",
+            "Aggregation": null,
+            "Sorting": null
+          },
+          {
+            "Role": "Value",
+            "Name": "CPC",
+            "Aggregation": "Avg",
+            "Sorting": null
+          }
+        ],
+        "HiddenFields": [],
+        "FilterFields": []
+      }
+    ],
+    "Narrative": "1. Social Media Campaign Data (Grid, table: Social_Media)\nThis table displays detailed records for each social media campaign, showing the Date, Platform, Campaign name, Impressions, Engagement, Click-Through Rate (CTR), Cost Per Click (CPC), and Conversions. All listed fields are visible as columns. The data is presented in a tabular format without any specified sorting or filters.\n\n2. Impressions by Platform (Column, table: Social_Media)\nThis column chart summarizes the total number of Impressions for each Platform. It aggregates Impressions using the sum function and groups the results by Platform. No filters or sorting beyond the grouping are specified.\n\n3. Engagement by Campaign (Bar, table: Social_Media)\nThis bar chart shows the total Engagement for each Campaign. Engagement values are summed and grouped by Campaign. There are no additional filters or sorting indicated.\n\n4. Conversions Over Time (Line, table: Social_Media)\nThis line chart tracks the sum of Conversions over time, with Date on the x-axis and total Conversions on the y-axis. The data is grouped by Date, allowing users to observe trends in Conversions across different dates.\n\n5. CTR by Platform (Doughnut, table: Social_Media)\nThis doughnut chart displays the average Click-Through Rate (CTR) for each Platform. The chart groups data by Platform and calculates the average CTR for each group. No filters or sorting are applied.\n\n6. CPC by Campaign (Doughnut, table: Social_Media)\nThis doughnut chart presents the average Cost Per Click (CPC) for each Campaign. Data is grouped by Campaign, and the average CPC is calculated for each group. No filters or sorting are specified.\n\nAcross the whole dashboard\nAll visualizations use data from the Social_Media table, and there are no dashboard-level filters applied. The dashboard provides both detailed and aggregated views of campaign performance metrics, grouped by Platform, Campaign, and Date as appropriate for each visualization.",
+    "NarrativeSource": "llm",
+    "GeneratedAt": "2026-07-22T12:01:01.8645708+00:00"
+  }
+}

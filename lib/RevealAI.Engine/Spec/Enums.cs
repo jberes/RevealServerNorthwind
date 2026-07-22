@@ -53,7 +53,9 @@ public enum VizType
     ScatterChart,
     BubbleChart,
     KpiTarget,
-    Pivot
+    Pivot,
+    /// <summary>Single-value headline metric (Reveal's Text view): one aggregated measure.</summary>
+    Text
 }
 
 /// <summary>

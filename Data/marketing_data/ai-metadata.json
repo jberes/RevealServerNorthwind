@@ -1,0 +1,37 @@
+{
+  "Email_Marketing_Campaign": {
+    "fields": {
+      "Bounced": {
+        "alias": "Bounced Items",
+        "description": "Total number of bounced emails, etc."
+      },
+      "Bounce": {
+        "alias": "Bounce Rate",
+        "description": "Bounce Rate"
+      },
+      "Category": {
+        "alias": "Campaign Type",
+        "description": "This is the category of the campaign, like Email, Launch, etc."
+      },
+      "Opened": {
+        "alias": "Open Rate"
+      },
+      "Open": {
+        "alias": "Open Rate",
+        "description": "Open Rate of the Campaign Type"
+      },
+      "Click": {
+        "alias": "Click Rate"
+      },
+      "Clicked": {
+        "alias": "Items Clicked"
+      },
+      "Unsubscribed": {
+        "description": "Total number of Unsubscribed from this Campaign"
+      },
+      "Recipients": {
+        "description": "Total number of people this campaign targetted"
+      }
+    }
+  }
+}

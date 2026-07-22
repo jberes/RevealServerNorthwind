@@ -60,6 +60,8 @@ public static class SpecValidator
                 Require(spec, FieldRole.XAxis, 1) ?? Require(spec, FieldRole.YAxis, 1),
             VizType.KpiTarget =>
                 Require(spec, FieldRole.Value, 1) ?? Require(spec, FieldRole.Target, 1),
+            VizType.Text =>
+                Require(spec, FieldRole.Value, 1),
             _ => // category charts: column/bar/line/area/spline
                 Require(spec, FieldRole.Label, 1) ?? Require(spec, FieldRole.Value, 1)
         };

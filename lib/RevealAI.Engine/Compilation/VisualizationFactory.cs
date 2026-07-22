@@ -16,7 +16,8 @@ public sealed class VisualizationFactory
     {
         VizType.Grid, VizType.ColumnChart, VizType.BarChart, VizType.LineChart,
         VizType.AreaChart, VizType.SplineChart, VizType.PieChart, VizType.DoughnutChart,
-        VizType.FunnelChart, VizType.ScatterChart, VizType.BubbleChart, VizType.KpiTarget
+        VizType.FunnelChart, VizType.ScatterChart, VizType.BubbleChart, VizType.KpiTarget,
+        VizType.Text
     };
 
     public IVisualization Build(VisualizationSpec spec, DataSourceItem dataSourceItem)
@@ -37,6 +38,7 @@ public sealed class VisualizationFactory
             VizType.ScatterChart => Axis(new ScatterVisualization(title, dataSourceItem), spec),
             VizType.BubbleChart => Bubble(new BubbleVisualization(title, dataSourceItem), spec),
             VizType.KpiTarget => Kpi(new KpiTargetVisualization(title, dataSourceItem), spec),
+            VizType.Text => Text(new TextVisualization(title, dataSourceItem), spec),
             _ => throw new NotSupportedException(
                 $"VizType '{spec.VizType}' is not supported by the Compiler. Supported: {string.Join(", ", SupportedTypes)}.")
         };
@@ -129,6 +131,14 @@ public sealed class VisualizationFactory
         var targets = spec.ByRole(FieldRole.Target).Select(ToNumberField).ToArray();
         if (targets.Length > 0) viz.SetTargets(targets);
 
+        return viz;
+    }
+
+    /// <summary>Text (single-value headline metric): one aggregated Value measure.</summary>
+    private static TextVisualization Text(TextVisualization viz, VisualizationSpec spec)
+    {
+        var values = spec.ByRole(FieldRole.Value).Select(ToNumberField).ToArray();
+        if (values.Length > 0) viz.SetValues(values);
         return viz;
     }
 
