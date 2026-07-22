@@ -443,7 +443,8 @@ app.MapPost("/data/upload", async (IFormFile file, ExcelToSqliteImporter importe
 // DELETE /sources/{sourceId}?deleteDashboards=true — remove a source entirely:
 // its data folder, (by default) its dashboards, its AI selection/metadata.
 app.MapDelete("/sources/{sourceId}", async (string sourceId, bool? deleteDashboards,
-    Reveal.Sdk.AI.AspNetCore.Services.IMetadataService metadataService, ShareService shares) =>
+    Reveal.Sdk.AI.AspNetCore.Services.IMetadataService metadataService,
+    Reveal.Sdk.AI.Metadata.IMetadataManager metadataManager, ShareService shares) =>
 {
     if (string.Equals(sourceId, SourceRegistry.DefaultSourceId, StringComparison.OrdinalIgnoreCase))
         return Results.BadRequest(new { message = "The built-in 'northwind' source cannot be deleted." });
@@ -459,6 +460,7 @@ app.MapDelete("/sources/{sourceId}", async (string sourceId, bool? deleteDashboa
         SqliteConnection.ClearAllPools();   // Windows: pooled handles keep the .sqlite locked
         sourceRegistry.Delete(sourceId, deleteDashboards ?? true);
         aiCatalog.RebuildCatalogJson();
+        await metadataManager.Reload();     // drop the deleted source from the in-memory list
         shares.RemoveForSource(sourceId);
         return Results.Ok();
     }
@@ -911,8 +913,9 @@ app.MapGet("/ai/catalog", (HttpContext http) =>
   .ProducesProblem(StatusCodes.Status500InternalServerError);
 
 // PUT /ai/catalog — set the AI selection for the active source and regenerate metadata.
-app.MapPut("/ai/catalog", (AiCatalogUpdateRequest req, HttpContext http,
+app.MapPut("/ai/catalog", async (AiCatalogUpdateRequest req, HttpContext http,
     Reveal.Sdk.AI.AspNetCore.Services.IMetadataService metadataService,
+    Reveal.Sdk.AI.Metadata.IMetadataManager metadataManager,
     SuggestedQuestionsService questions) =>
 {
     try
@@ -925,6 +928,12 @@ app.MapPut("/ai/catalog", (AiCatalogUpdateRequest req, HttpContext http,
             return Results.Conflict(new { message = "Metadata generation is already running — try again shortly." });
 
         var validated = aiCatalog.SetSelection(src.SourceId, req?.Tables ?? new List<string>());
+
+        // CRITICAL: the MetadataManager caches the catalog's datasource LIST in
+        // memory at startup — chat resolves datasource ids against that cache, so
+        // a source added/removed at runtime is invisible ("Datasource with ID 'x'
+        // not found") until the manager reloads the rewritten catalog.json.
+        await metadataManager.Reload();
 
         if (validated.Count == 0)
         {

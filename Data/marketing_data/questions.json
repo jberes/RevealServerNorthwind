@@ -1,0 +1,12 @@
+{
+  "GeneratedAt": "2026-07-22T01:48:56.4034798+00:00",
+  "Source": "llm",
+  "Questions": [
+    "What was the total number of email recipients last month?",
+    "Which email campaign category had the highest open rate?",
+    "Show email bounce rate trend over the past 6 months.",
+    "Rank social media platforms by total impressions.",
+    "How many conversions did each social media campaign generate?",
+    "What is the average CTR by social media platform this year?"
+  ]
+}

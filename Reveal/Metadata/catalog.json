@@ -1,6 +1,88 @@
 {
   "Datasources": [
     {
+      "Id": "marketing_data",
+      "Provider": "SQLITE",
+      "Databases": [
+        {
+          "Name": "marketing_data",
+          "DiscoveryMode": "Restricted",
+          "Tables": [
+            {
+              "Name": "Email_Marketing_Campaign",
+              "Fields": [
+                {
+                  "Name": "Category"
+                },
+                {
+                  "Name": "Recipients"
+                },
+                {
+                  "Name": "Bounced"
+                },
+                {
+                  "Name": "Bounce"
+                },
+                {
+                  "Name": "Opened"
+                },
+                {
+                  "Name": "Implied_Opens"
+                },
+                {
+                  "Name": "Actual_Opens"
+                },
+                {
+                  "Name": "Open"
+                },
+                {
+                  "Name": "Clicked"
+                },
+                {
+                  "Name": "Click"
+                },
+                {
+                  "Name": "Unsubscribed"
+                },
+                {
+                  "Name": "Date"
+                }
+              ]
+            },
+            {
+              "Name": "Social_Media",
+              "Fields": [
+                {
+                  "Name": "Date"
+                },
+                {
+                  "Name": "Platform"
+                },
+                {
+                  "Name": "Impressions"
+                },
+                {
+                  "Name": "Engagement"
+                },
+                {
+                  "Name": "CTR"
+                },
+                {
+                  "Name": "CPC"
+                },
+                {
+                  "Name": "Conversions"
+                },
+                {
+                  "Name": "Campaign"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
       "Id": "northwind",
       "Provider": "SQLITE",
       "Databases": [
