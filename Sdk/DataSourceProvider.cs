@@ -1,23 +1,17 @@
-using Microsoft.Extensions.Options;
 using Reveal.Sdk;
 using Reveal.Sdk.Data;
 using Reveal.Sdk.Data.SQLite;
+using RevealSdk.Services;
 
 namespace RevealSdk.Sdk
 {
     public class DataSourceProvider : IRVDataSourceProvider
     {
-        private readonly string _databasePath;
+        private readonly SourceRegistry _registry;
 
-        // Resolve the SQLite file path once. Relative paths (the default
-        // "Data/northwind.sqlite") are anchored to the content root so they resolve the
-        // same whether the process CWD is the project dir or an Azure App Service root.
-        public DataSourceProvider(IOptions<SqliteOptions> options, IWebHostEnvironment env)
+        public DataSourceProvider(SourceRegistry registry)
         {
-            var path = string.IsNullOrWhiteSpace(options.Value.DatabasePath)
-                ? "Data/northwind.sqlite"
-                : options.Value.DatabasePath;
-            _databasePath = Path.IsPathRooted(path) ? path : Path.Combine(env.ContentRootPath, path);
+            _registry = registry;
         }
 
         public Task<RVDataSourceItem> ChangeDataSourceItemAsync(IRVUserContext userContext,
@@ -30,7 +24,7 @@ namespace RevealSdk.Sdk
                 ChangeDataSourceAsync(userContext, sqliteItem.DataSource);
 
                 // AI/catalog-generated items pass the table/view name as the item Id when
-                // Table isn't set explicitly — fall back to it (matches the old SQL provider).
+                // Table isn't set explicitly — fall back to it.
                 if (string.IsNullOrWhiteSpace(sqliteItem.Table) && !string.IsNullOrWhiteSpace(sqliteItem.Id))
                     sqliteItem.Table = sqliteItem.Id;
             }
@@ -42,9 +36,40 @@ namespace RevealSdk.Sdk
             RVDashboardDataSource dataSource)
         {
             if (dataSource is RVSQLiteDataSource sqlite)
-                sqlite.Database = _databasePath;
+                sqlite.Database = ResolvePath(userContext, dataSource.Id);
 
             return Task.FromResult(dataSource);
+        }
+
+        /// <summary>
+        /// Resolve the .sqlite file for a request. Order:
+        ///  1. the datasource Id IS a known sourceId — the metadata-catalog convention
+        ///     (catalog datasource Id == sourceId). This is what makes AI metadata
+        ///     generation work per source: its background user context has NULL
+        ///     Properties, but the catalog datasource id round-trips here.
+        ///  2. legacy aliases from pre-multi-source dashboards: "NorthwindSql" (AI-saved)
+        ///     and "sqlServer" (engine-generated) both meant the northwind DB.
+        ///  3. the active source carried by the user context (X-DataSource header / share claim).
+        ///  4. the default source.
+        /// </summary>
+        private string ResolvePath(IRVUserContext? userContext, string? dataSourceId)
+        {
+            var byId = _registry.Find(dataSourceId);
+            if (byId is not null) return byId.SqlitePath;
+
+            if (string.Equals(dataSourceId, "NorthwindSql", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(dataSourceId, "sqlServer", StringComparison.OrdinalIgnoreCase))
+            {
+                var northwind = _registry.Find(SourceRegistry.DefaultSourceId);
+                if (northwind is not null) return northwind.SqlitePath;
+            }
+
+            var fromContext = userContext?.Properties is not null
+                && userContext.Properties.TryGetValue("SourceId", out var sid)
+                    ? sid?.ToString()
+                    : null;
+
+            return _registry.Resolve(fromContext).SqlitePath;
         }
     }
 }

@@ -12,6 +12,7 @@ using Reveal.Sdk.AI;
 using Reveal.Sdk.Dom;
 using RevealExcel.Sdk;
 using RevealSdk.Sdk;
+using RevealSdk.Services;
 using System.Text.Json.Serialization;
 // RevealAI.Engine — schema → AI-recommended visualizations → compiled .rdash.
 using RevealAI.Engine;
@@ -26,89 +27,28 @@ using RevealAI.Engine.Compilation;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// ---- Build the Reveal AI metadata catalog (whitelisted tables/views) ----
-// A single whitelist — SqlServer:CatalogObjects in appsettings — is the source of
-// truth, and it is used TWO ways (see https://help.revealbi.io/ai/metadata-catalog/):
-//   1) HERE: build a "Restricted" catalog.json that is handed to the Reveal AI SDK
-//      below via UseMetadataCatalogFile. Restricted discovery means Reveal AI only
-//      ever sees and queries the listed objects — everything else is invisible to it.
-//   2) The /sql/objects endpoint filters the Connections page's tables/views list to
-//      exactly this same set, so the UI and the AI agree on what is available.
-// For each whitelisted object we look up its real columns so the catalog carries
-// field metadata (which materially improves the AI's query/visualization quality).
-var sqlOptions = builder.Configuration.GetSection("Sqlite").Get<SqliteOptions>()
-                 ?? new SqliteOptions();
+// ---- Folder-per-source layout: migrate + build the AI metadata catalog ----
+// Layout: Data/{sourceId}/{sourceId}.sqlite and Dashboards/{sourceId}/*.rdash.
+// A one-time migration moves the legacy flat layout (Data/northwind.sqlite +
+// Dashboards/*.rdash) into the "northwind" source. Which tables each source
+// exposes to the AI lives in Data/{sourceId}/ai-selection.json (seeded from
+// Sqlite:CatalogObjects for northwind) and is compiled into the Restricted
+// catalog.json by AiCatalogService — the /sql browsing endpoints are NOT
+// filtered by it (the whitelist limits only the AI).
+MigrateLegacyLayout(builder.Environment.ContentRootPath);
 
-// Resolve the SQLite file path (relative → anchored to the content root).
-var sqliteDbPath = string.IsNullOrWhiteSpace(sqlOptions.DatabasePath)
-    ? "Data/northwind.sqlite"
-    : sqlOptions.DatabasePath;
-if (!Path.IsPathRooted(sqliteDbPath))
-    sqliteDbPath = Path.Combine(builder.Environment.ContentRootPath, sqliteDbPath);
+var sourceRegistry = new SourceRegistry(builder.Environment);
+var aiCatalog = new AiCatalogService(sourceRegistry, builder.Environment);
 
-// The whitelist (bare table/view names). Captured by the /sql endpoints below too.
-var catalogObjects = (sqlOptions.CatalogObjects ?? Array.Empty<string>())
-    .Where(n => !string.IsNullOrWhiteSpace(n))
-    .Select(n => n.Trim())
-    .ToArray();
+// Seed northwind's AI selection from appsettings on first run (seed-only; the
+// selection file is the source of truth afterwards).
+var seedObjects = builder.Configuration.GetSection("Sqlite").Get<SqliteOptions>()?.CatalogObjects
+                  ?? Array.Empty<string>();
+if (seedObjects.Length > 0)
+    aiCatalog.SeedSelectionIfMissing(SourceRegistry.DefaultSourceId, seedObjects);
 
-var catalogColumns = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-try
-{
-    catalogColumns = DiscoverColumns(sqliteDbPath, catalogObjects);
-    Console.WriteLine($"[AI Catalog] SQLite '{sqliteDbPath}' — whitelisted {catalogObjects.Length} object(s): {string.Join(", ", catalogObjects)}");
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"[AI Catalog] Could not read columns for catalog objects: {ex.Message}");
-}
-
-// Anchor to ContentRootPath (NOT Directory.GetCurrentDirectory()): on Azure App
-// Service the process working directory is not the app's content root, so a relative
-// path here would write/read different folders than UseMetadataCatalogFile resolves,
-// leaving the AI engine with an empty catalog ("key 'NorthwindSql' not present").
-var catalogDir = Path.Combine(builder.Environment.ContentRootPath, "Reveal", "Metadata");
-Directory.CreateDirectory(catalogDir);
-var catalogPath = Path.Combine(catalogDir, "catalog.json");
-// Logical database name used to group metadata for the AI SDK. SQLite has no
-// database/schema concept, so we use the file's base name (e.g. "northwind").
-var sqliteDbName = Path.GetFileNameWithoutExtension(sqliteDbPath);
-var catalog = new
-{
-    Datasources = new object[]
-    {
-        new
-        {
-            Id = "NorthwindSql",
-            Provider = "SQLITE",
-            Databases = new object[]
-            {
-                new
-                {
-                    Name = sqliteDbName,
-                    DiscoveryMode = "Restricted",
-                    // SQLite tables/views are unqualified (no schema prefix).
-                    Tables = catalogObjects.Select(v => new
-                    {
-                        Name = v,
-                        Fields = (catalogColumns.TryGetValue(v, out var cols) ? cols : new List<string>())
-                            .Select(c => new { Name = c })
-                            .ToArray()
-                    }).ToArray()
-                }
-            }
-        }
-    }
-};
-File.WriteAllText(catalogPath,
-    System.Text.Json.JsonSerializer.Serialize(catalog,
-        new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
-
-// Case-insensitive lookup of the whitelist, shared by the /sql browsing endpoints.
-// Null when no whitelist is configured (endpoints then fall back to showing everything).
-var catalogFilter = catalogObjects.Length > 0
-    ? new HashSet<string>(catalogObjects, StringComparer.OrdinalIgnoreCase)
-    : null;
+aiCatalog.RebuildCatalogJson();
+var catalogPath = aiCatalog.CatalogPath;
 // ---------------------------------------------------------------------------
 
 builder.Services.AddControllers().AddReveal(revealBuilder =>
@@ -117,6 +57,7 @@ builder.Services.AddControllers().AddReveal(revealBuilder =>
     // authentication provider (the Azure SQL Server connection was removed).
     revealBuilder
         .AddDataSourceProvider<DataSourceProvider>()
+        .AddDashboardProvider<DashboardProvider>()
         .AddObjectFilter<DataSourceItemFilter>()
         .AddUserContextProvider<UserContextProvider>()
         .DataSources.RegisterSQLite();
@@ -131,6 +72,15 @@ builder.Services.AddControllers().AddReveal(revealBuilder =>
 
 builder.Services.Configure<SqliteOptions>(
     builder.Configuration.GetSection("Sqlite"));
+
+// The registry/catalog instances created above (needed before Build() for the
+// startup migration + catalog rebuild) are the app-wide singletons.
+builder.Services.AddSingleton(sourceRegistry);
+builder.Services.AddSingleton(aiCatalog);
+builder.Services.AddSingleton<ExcelToSqliteImporter>();
+builder.Services.AddSingleton<SuggestedQuestionsService>();
+builder.Services.AddSingleton<ShareService>();
+builder.Services.AddSingleton<DashboardAnalyzer>();
 
 // ---- Authentication (JWT bearer) ---------------------------------------
 // The client logs in at /auth/login with credentials from the "Auth" config
@@ -259,15 +209,26 @@ app.UseStaticFiles(new StaticFileOptions
 app.UseSwagger();
 app.UseSwaggerUI();
 
-// Serve Excel files from the Data folder at /data/{filename}.xlsx
-var dataFolderPath = Path.Combine(Directory.GetCurrentDirectory(), "Data");
-if (!Directory.Exists(dataFolderPath))
-    Directory.CreateDirectory(dataFolderPath);
+// Resolve the ACTIVE SOURCE for an endpoint request: X-DataSource header (set
+// globally by the client) ?? sourceId claim (share tokens) ?? the default source.
+SourceInfo ResolveSource(HttpContext http) =>
+    sourceRegistry.Resolve(http.Request.Headers["X-DataSource"].FirstOrDefault()
+                           ?? http.User.FindFirst("sourceId")?.Value);
 
+// Serve ONLY Excel workbooks from the Data tree at /data/{sourceId}/{file}.xlsx.
+// The content-type whitelist matters: per-source JSON artifacts (ai-selection.json,
+// questions.json) live in the same folders and must NOT be anonymously downloadable.
+var excelOnlyTypes = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider(
+    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        [".xlsx"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        [".xls"] = "application/vnd.ms-excel"
+    });
 app.UseStaticFiles(new StaticFileOptions
 {
-    FileProvider = new PhysicalFileProvider(dataFolderPath),
+    FileProvider = new PhysicalFileProvider(dataDirectory),
     RequestPath = "/data",
+    ContentTypeProvider = excelOnlyTypes,
     ServeUnknownFileTypes = false,
     OnPrepareResponse = ctx =>
     {
@@ -276,13 +237,15 @@ app.UseStaticFiles(new StaticFileOptions
 });
 
 
-app.MapGet("/dashboards/names", () =>
+app.MapGet("/dashboards/names", (HttpContext http) =>
 {
     try
     {
-        string folderPath = Path.Combine(Directory.GetCurrentDirectory(), "Dashboards");
-        var files = Directory.GetFiles(folderPath);
-        Random rand = new();
+        var folderPath = ResolveSource(http).DashboardsDir;
+        // *.rdash only — {name}.analysis.json caches live alongside the dashboards.
+        var files = Directory.Exists(folderPath)
+            ? Directory.GetFiles(folderPath, "*.rdash")
+            : Array.Empty<string>();
 
         var fileNames = files.Select(file =>
         {
@@ -313,9 +276,9 @@ app.MapGet("/dashboards/names", () =>
 .Produces(StatusCodes.Status404NotFound)
 .ProducesProblem(StatusCodes.Status500InternalServerError);
 
-app.MapGet("/dashboards/{name}/thumbnail", (string name) =>
+app.MapGet("/dashboards/{name}/thumbnail", (string name, HttpContext http) =>
 {
-    var path = "dashboards/" + name + ".rdash";
+    var path = Path.Combine(ResolveSource(http).DashboardsDir, name + ".rdash");
     if (File.Exists(path))
     {
         var dashboard = new Dashboard(path);
@@ -328,12 +291,15 @@ app.MapGet("/dashboards/{name}/thumbnail", (string name) =>
     }
 });
 
-app.MapGet("dashboards/visualizations", () =>
+app.MapGet("dashboards/visualizations", (HttpContext http) =>
 {
     try
     {
         var allVisualizationChartInfos = new List<VisualizationChartInfo>();
-        var dashboardFiles = Directory.GetFiles("Dashboards", "*.rdash");
+        var dashDir = ResolveSource(http).DashboardsDir;
+        var dashboardFiles = Directory.Exists(dashDir)
+            ? Directory.GetFiles(dashDir, "*.rdash")
+            : Array.Empty<string>();
 
         foreach (var filePath in dashboardFiles)
         {
@@ -375,74 +341,97 @@ app.MapGet("dashboards/visualizations", () =>
 }).Produces<IEnumerable<VisualizationChartInfo>>(StatusCodes.Status200OK)
   .Produces(StatusCodes.Status500InternalServerError);
 
-app.MapGet("/data/files", () =>
+// ---------------------------------------------------------------------------
+// Data sources: list, upload (Excel → per-source SQLite import), delete.
+// ---------------------------------------------------------------------------
+
+// GET /sources — every data source (folder under Data/ containing a .sqlite).
+app.MapGet("/sources", () =>
 {
     try
     {
-        string folderPath = Path.Combine(Directory.GetCurrentDirectory(), "Data");
-        
-        if (!Directory.Exists(folderPath))
+        sourceRegistry.Refresh();
+        var list = sourceRegistry.GetSources().Select(s =>
         {
-            return Results.NotFound("Data folder not found.");
-        }
-
-        var files = Directory.GetFiles(folderPath);
-        var fileNames = files.Select(file => Path.GetFileNameWithoutExtension(file)).ToList();
-
-        return Results.Ok(fileNames);
+            int tables = 0;
+            try
+            {
+                tables = AiCatalogService.ListObjects(s.SqlitePath).Count;
+            }
+            catch { /* unreadable DB — still list the source */ }
+            var dashboards = Directory.Exists(s.DashboardsDir)
+                ? Directory.GetFiles(s.DashboardsDir, "*.rdash").Length
+                : 0;
+            return new
+            {
+                id = s.SourceId,
+                name = s.SourceId,
+                kind = s.Kind,
+                tables,
+                dashboards,
+                workbookFile = s.WorkbookPath is null ? null : Path.GetFileName(s.WorkbookPath)
+            };
+        }).ToList();
+        return Results.Ok(list);
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Error reading Data directory: {ex.Message}");
-        return Results.Problem("An unexpected error occurred while processing the request.");
+        Console.WriteLine($"Error listing sources: {ex.Message}");
+        return Results.Problem("An unexpected error occurred while listing data sources.");
     }
-}).Produces<IEnumerable<string>>(StatusCodes.Status200OK)
-  .Produces(StatusCodes.Status404NotFound)
+}).Produces(StatusCodes.Status200OK)
   .ProducesProblem(StatusCodes.Status500InternalServerError);
 
-app.MapPost("/data/upload", async (IFormFile file) =>
+// POST /data/upload — upload an Excel workbook and import it into a NEW source:
+// every worksheet tab becomes a table in Data/{sourceId}/{sourceId}.sqlite.
+// The original workbook is kept alongside for preview/download. The new source is
+// NOT auto-added to the AI catalog (the user opts tables in from /connections).
+app.MapPost("/data/upload", async (IFormFile file, ExcelToSqliteImporter importer, CancellationToken ct) =>
 {
+    if (file == null || file.Length == 0)
+        return Results.BadRequest(new { message = "No file provided." });
+
+    var fileExtension = Path.GetExtension(file.FileName).ToLowerInvariant();
+    if (fileExtension is not (".xlsx" or ".xls"))
+        return Results.BadRequest(new { message = "Only Excel files (.xlsx, .xls) are allowed." });
+
+    var sourceId = SourceRegistry.Sanitize(Path.GetFileNameWithoutExtension(file.FileName)).ToLowerInvariant();
+    if (sourceRegistry.Find(sourceId) is not null)
+        return Results.Conflict(new { message = $"A data source named '{sourceId}' already exists. Delete it first or rename the file." });
+
+    var src = sourceRegistry.Create(sourceId);
+    var dataDir = Path.GetDirectoryName(src.SqlitePath)!;
+    var workbookPath = Path.Combine(dataDir, Path.GetFileName(file.FileName));
     try
     {
-        if (file == null || file.Length == 0)
+        await using (var stream = new FileStream(workbookPath, FileMode.Create))
         {
-            return Results.BadRequest(new { message = "No file provided." });
+            await file.CopyToAsync(stream, ct);
         }
 
-        var allowedExtensions = new[] { ".xlsx", ".xls" };
-        var fileExtension = Path.GetExtension(file.FileName).ToLowerInvariant();
+        var import = await importer.ImportAsync(workbookPath, src.SqlitePath, ct);
+        sourceRegistry.Refresh();
 
-        if (!allowedExtensions.Contains(fileExtension))
+        return Results.Ok(new
         {
-            return Results.BadRequest(new { message = "Only Excel files (.xlsx, .xls) are allowed." });
-        }
-
-        string folderPath = Path.Combine(Directory.GetCurrentDirectory(), "Data");
-        
-        if (!Directory.Exists(folderPath))
-        {
-            Directory.CreateDirectory(folderPath);
-        }
-
-        var fileName = Path.GetFileName(file.FileName);
-        var filePath = Path.Combine(folderPath, fileName);
-
-        if (File.Exists(filePath))
-        {
-            return Results.Conflict(new { message = $"File '{fileName}' already exists." });
-        }
-
-        using (var stream = new FileStream(filePath, FileMode.Create))
-        {
-            await file.CopyToAsync(stream);
-        }
-
-        return Results.Ok(new { message = "File uploaded successfully.", fileName = fileName });
+            sourceId,
+            fileName = Path.GetFileName(workbookPath),
+            tables = import.Tables.Select(t => new { name = t.Name, rows = t.Rows, columns = t.Columns }),
+            warnings = import.Warnings
+        });
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Error uploading file: {ex.Message}");
-        return Results.Problem("An error occurred while uploading the file.");
+        // Roll back the half-created source folder so a retry isn't blocked by 409.
+        try
+        {
+            SqliteConnection.ClearAllPools();
+            if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true);
+            sourceRegistry.Refresh();
+        }
+        catch { /* best-effort cleanup */ }
+        Console.WriteLine($"Error importing '{file.FileName}': {ex.Message}");
+        return Results.BadRequest(new { message = $"Could not import the workbook: {ex.Message}" });
     }
 }).Accepts<IFormFile>("multipart/form-data")
   .Produces<object>(StatusCodes.Status200OK)
@@ -451,11 +440,43 @@ app.MapPost("/data/upload", async (IFormFile file) =>
   .ProducesProblem(StatusCodes.Status500InternalServerError)
   .DisableAntiforgery();
 
-
-// Check if a dashboard name already exists
-app.MapGet("/isduplicatename/{name}", (string name) =>
+// DELETE /sources/{sourceId}?deleteDashboards=true — remove a source entirely:
+// its data folder, (by default) its dashboards, its AI selection/metadata.
+app.MapDelete("/sources/{sourceId}", async (string sourceId, bool? deleteDashboards,
+    Reveal.Sdk.AI.AspNetCore.Services.IMetadataService metadataService, ShareService shares) =>
 {
-    var folderPath = Path.Combine(Directory.GetCurrentDirectory(), "Dashboards");
+    if (string.Equals(sourceId, SourceRegistry.DefaultSourceId, StringComparison.OrdinalIgnoreCase))
+        return Results.BadRequest(new { message = "The built-in 'northwind' source cannot be deleted." });
+    if (sourceRegistry.Find(sourceId) is null)
+        return Results.NotFound();
+
+    try
+    {
+        // Remove AI metadata + catalog entry first (the selection file dies with the folder).
+        try { await metadataService.RemoveMetadataAsync(sourceId, null); }
+        catch (Exception ex) { Console.WriteLine($"[Sources] metadata removal for '{sourceId}': {ex.Message}"); }
+
+        SqliteConnection.ClearAllPools();   // Windows: pooled handles keep the .sqlite locked
+        sourceRegistry.Delete(sourceId, deleteDashboards ?? true);
+        aiCatalog.RebuildCatalogJson();
+        shares.RemoveForSource(sourceId);
+        return Results.Ok();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error deleting source '{sourceId}': {ex.Message}");
+        return Results.Problem($"Error deleting source: {ex.Message}");
+    }
+}).Produces(StatusCodes.Status200OK)
+  .Produces(StatusCodes.Status400BadRequest)
+  .Produces(StatusCodes.Status404NotFound)
+  .ProducesProblem(StatusCodes.Status500InternalServerError);
+
+
+// Check if a dashboard name already exists (within the active source)
+app.MapGet("/isduplicatename/{name}", (string name, HttpContext http) =>
+{
+    var folderPath = ResolveSource(http).DashboardsDir;
     return Results.Ok(File.Exists(Path.Combine(folderPath, $"{name}.rdash")));
 });
 
@@ -466,25 +487,28 @@ app.MapGet("/isduplicatename/{name}", (string name) =>
 // handlers, so a GET matched the template but no method → 405 Method Not Allowed.
 // Literal segments ("names", "visualizations") outrank the {name} parameter in
 // routing, so those GET endpoints above still take precedence.
-app.MapGet("/dashboards/{name}", (string name) =>
+app.MapGet("/dashboards/{name}", (string name, HttpContext http) =>
 {
-    var filePath = Path.Combine(Directory.GetCurrentDirectory(), "Dashboards", $"{name}.rdash");
+    var filePath = Path.Combine(ResolveSource(http).DashboardsDir, $"{name}.rdash");
     if (!File.Exists(filePath)) return Results.NotFound();
     return Results.File(File.ReadAllBytes(filePath), "application/octet-stream", $"{name}.rdash");
 }).Produces(StatusCodes.Status200OK)
   .Produces(StatusCodes.Status404NotFound);
 
-// POST /dashboards/{name} — create new dashboard
+// POST /dashboards/{name} — create new dashboard (in the active source)
 // Accepts either raw rdash bytes (ZIP) from the Reveal SDK or DOM JSON from the
 // AI Assistant. DOM JSON is parsed by the Reveal DOM and saved as a real .rdash.
-app.MapPost("/dashboards/{name}", async (HttpRequest request, string name) =>
+app.MapPost("/dashboards/{name}", async (HttpRequest request, string name, HttpContext http) =>
 {
     var ms = new MemoryStream();
     await request.Body.CopyToAsync(ms);
-    var filePath = Path.Combine(Directory.GetCurrentDirectory(), "Dashboards", $"{name}.rdash");
+    var dashDir = ResolveSource(http).DashboardsDir;
+    Directory.CreateDirectory(dashDir);
+    var filePath = Path.Combine(dashDir, $"{name}.rdash");
     try
     {
         SaveDashboardDocument(ms.ToArray(), filePath);
+        DeleteAnalysisCache(filePath);
         return Results.Ok();
     }
     catch (Exception ex)
@@ -497,15 +521,16 @@ app.MapPost("/dashboards/{name}", async (HttpRequest request, string name) =>
 
 // PUT /dashboards/{name} — overwrite an existing dashboard file
 // Accepts either raw rdash bytes (ZIP) from the Reveal SDK or DOM JSON from the AI Assistant.
-app.MapPut("/dashboards/{name}", async (HttpRequest request, string name) =>
+app.MapPut("/dashboards/{name}", async (HttpRequest request, string name, HttpContext http) =>
 {
-    var filePath = Path.Combine(Directory.GetCurrentDirectory(), "Dashboards", $"{name}.rdash");
+    var filePath = Path.Combine(ResolveSource(http).DashboardsDir, $"{name}.rdash");
     if (!File.Exists(filePath)) return Results.NotFound();
     var ms = new MemoryStream();
     await request.Body.CopyToAsync(ms);
     try
     {
         SaveDashboardDocument(ms.ToArray(), filePath);
+        DeleteAnalysisCache(filePath);
         return Results.Ok();
     }
     catch (Exception ex)
@@ -517,25 +542,15 @@ app.MapPut("/dashboards/{name}", async (HttpRequest request, string name) =>
   .Produces(StatusCodes.Status404NotFound)
   .ProducesProblem(StatusCodes.Status500InternalServerError);
 
-// DELETE /data/files/{name} — delete an Excel file from the Data folder
-app.MapDelete("/data/files/{name}", (string name) =>
+// DELETE /dashboards/{name} — remove a dashboard file (+ analysis cache + share links)
+app.MapDelete("/dashboards/{name}", (string name, HttpContext http, ShareService shares) =>
 {
-    var folderPath = Path.Combine(Directory.GetCurrentDirectory(), "Data");
-    var xlsxPath = Path.Combine(folderPath, $"{name}.xlsx");
-    var xlsPath  = Path.Combine(folderPath, $"{name}.xls");
-    var filePath = File.Exists(xlsxPath) ? xlsxPath : File.Exists(xlsPath) ? xlsPath : null;
-    if (filePath is null) return Results.NotFound();
-    File.Delete(filePath);
-    return Results.Ok();
-}).Produces(StatusCodes.Status200OK)
-  .Produces(StatusCodes.Status404NotFound);
-
-// DELETE /dashboards/{name} — remove a dashboard file
-app.MapDelete("/dashboards/{name}", (string name) =>
-{
-    var filePath = Path.Combine(Directory.GetCurrentDirectory(), "Dashboards", $"{name}.rdash");
+    var src = ResolveSource(http);
+    var filePath = Path.Combine(src.DashboardsDir, $"{name}.rdash");
     if (!File.Exists(filePath)) return Results.NotFound();
     File.Delete(filePath);
+    DeleteAnalysisCache(filePath);
+    shares.RemoveForDashboard(src.SourceId, name);
     return Results.Ok();
 }).Produces(StatusCodes.Status200OK)
   .Produces(StatusCodes.Status404NotFound);
@@ -547,20 +562,27 @@ app.MapDelete("/dashboards/{name}", (string name) =>
 // The endpoints close over sqliteDbPath and catalogFilter.
 // ---------------------------------------------------------------------------
 
-// GET /sql/connection — connection metadata for the tree header
-app.MapGet("/sql/connection", () => Results.Ok(new
+// GET /sql/connection — connection metadata for the tree header (active source)
+app.MapGet("/sql/connection", (HttpContext http) =>
 {
-    database = Path.GetFileName(sqliteDbPath),
-    path = sqliteDbPath,
-    provider = "SQLite"
-}));
+    var src = ResolveSource(http);
+    return Results.Ok(new
+    {
+        sourceId = src.SourceId,
+        database = Path.GetFileName(src.SqlitePath),
+        path = src.SqlitePath,
+        provider = "SQLite"
+    });
+});
 
-// GET /sql/objects — list all tables and views (whitelist-filtered)
-app.MapGet("/sql/objects", async () =>
+// GET /sql/objects — ALL tables and views in the active source. Deliberately
+// unfiltered: the AI whitelist (ai-selection.json → catalog.json) limits only
+// what the AI assistant can see, never what the Connections page can browse.
+app.MapGet("/sql/objects", async (HttpContext http) =>
 {
     try
     {
-        await using var conn = new SqliteConnection(SqliteConnString(sqliteDbPath));
+        await using var conn = new SqliteConnection(SqliteConnString(ResolveSource(http).SqlitePath));
         await conn.OpenAsync();
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"SELECT name, type FROM sqlite_master
@@ -571,13 +593,9 @@ app.MapGet("/sql/objects", async () =>
         var objects = new List<object>();
         while (await reader.ReadAsync())
         {
-            var objectName = reader.GetString(0);
-            // Whitelist: when Sqlite:CatalogObjects is set, the Connections page only
-            // shows those objects — the same set the Reveal AI metadata catalog is built from.
-            if (catalogFilter != null && !catalogFilter.Contains(objectName)) continue;
             objects.Add(new
             {
-                name = objectName,
+                name = reader.GetString(0),
                 type = reader.GetString(1) == "view" ? "view" : "table"
             });
         }
@@ -592,11 +610,11 @@ app.MapGet("/sql/objects", async () =>
   .ProducesProblem(StatusCodes.Status500InternalServerError);
 
 // GET /sql/data/{name}?top=N — return rows + column metadata for a table/view
-app.MapGet("/sql/data/{name}", async (string name, int? top) =>
+app.MapGet("/sql/data/{name}", async (string name, int? top, HttpContext http) =>
 {
     try
     {
-        await using var conn = new SqliteConnection(SqliteConnString(sqliteDbPath));
+        await using var conn = new SqliteConnection(SqliteConnString(ResolveSource(http).SqlitePath));
         await conn.OpenAsync();
 
         // Verify the object exists. This also guards the interpolated name below:
@@ -639,15 +657,15 @@ app.MapGet("/sql/data/{name}", async (string name, int? top) =>
   .Produces(StatusCodes.Status404NotFound)
   .ProducesProblem(StatusCodes.Status500InternalServerError);
 
-// GET /sql/rowcounts — { name: rowCount } for every whitelisted table/view.
-// SQLite has no stored statistics, so each is a COUNT(*) (the Northwind DB is
-// small). Best-effort: objects whose count can't be obtained are simply omitted.
-app.MapGet("/sql/rowcounts", async (CancellationToken ct) =>
+// GET /sql/rowcounts — { name: rowCount } for every table/view in the active
+// source. SQLite has no stored statistics, so each is a COUNT(*). Best-effort:
+// objects whose count can't be obtained are simply omitted.
+app.MapGet("/sql/rowcounts", async (HttpContext http, CancellationToken ct) =>
 {
     var counts = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
     try
     {
-        await using var conn = new SqliteConnection(SqliteConnString(sqliteDbPath));
+        await using var conn = new SqliteConnection(SqliteConnString(ResolveSource(http).SqlitePath));
         await conn.OpenAsync(ct);
 
         var names = new List<string>();
@@ -658,9 +676,7 @@ app.MapGet("/sql/rowcounts", async (CancellationToken ct) =>
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
             {
-                var n = r.GetString(0);
-                if (catalogFilter != null && !catalogFilter.Contains(n)) continue;
-                names.Add(n);
+                names.Add(r.GetString(0));
             }
         }
 
@@ -685,10 +701,9 @@ app.MapGet("/sql/rowcounts", async (CancellationToken ct) =>
 
 // ---------------------------------------------------------------------------
 // AI visualization endpoints (RevealAI.Engine) — used by the Connections page's
-// "Generate Visualizations" flow. The connection is built from the same
-// "SqlServer" config the rest of the app uses; credentials here are for
-// generation-time introspection only (the rendered .rdash resolves credentials
-// at view time via DataSourceProvider/AuthenticationProvider).
+// "Generate Visualizations" flow. The SQLite connection targets the request's
+// ACTIVE SOURCE; the generated .rdash embeds the sourceId as its datasource Id,
+// which DataSourceProvider resolves back to the right .sqlite at view time.
 // ---------------------------------------------------------------------------
 
 // Default guidance handed to the LLM recommender. The engine's validator requires
@@ -718,13 +733,14 @@ static string ComposeGuidance(string? userGuidance) =>
 // editable visualization suggestions.
 app.MapPost("/ai/visualizations/recommend",
     async (RecommendRequest req, SchemaIntrospectionService introspect, DashboardAiService svc,
-           CancellationToken ct) =>
+           HttpContext http, CancellationToken ct) =>
 {
     if (string.IsNullOrWhiteSpace(req?.Dataset))
         return Results.BadRequest(new { message = "A dataset (table or view name) is required." });
     try
     {
-        var conn = BuildAiConnection(sqliteDbPath);
+        var src = ResolveSource(http);
+        var conn = BuildAiConnection(src.SourceId, src.SqlitePath);
         var schema = await introspect.IntrospectAsync(conn, req.Dataset, 50, ct);
         var recs = await svc.RecommendAsync(schema,
             new RecommendationRequest { Guidance = ComposeGuidance(req.Guidance) }, ct);
@@ -749,7 +765,7 @@ app.MapPost("/ai/visualizations/recommend",
 // and return its Reveal DOM JSON for live rendering on the client.
 app.MapPost("/ai/visualizations/generate",
     async (GenerateRequest req, SchemaIntrospectionService introspect, DashboardAiService svc,
-           CancellationToken ct) =>
+           HttpContext http, CancellationToken ct) =>
 {
     if (string.IsNullOrWhiteSpace(req?.Dataset))
         return Results.BadRequest(new { message = "A dataset (table or view name) is required." });
@@ -757,7 +773,8 @@ app.MapPost("/ai/visualizations/generate",
         return Results.BadRequest(new { message = "Select at least one visualization to generate." });
     try
     {
-        var conn = BuildAiConnection(sqliteDbPath);
+        var src = ResolveSource(http);
+        var conn = BuildAiConnection(src.SourceId, src.SqlitePath);
         var schema = await introspect.IntrospectAsync(conn, req.Dataset, 50, ct);
         var spec = new DashboardSpec
         {
@@ -825,28 +842,294 @@ app.MapPost("/auth/login", (LoginRequest req, IConfiguration config) =>
   .Produces(StatusCodes.Status200OK)
   .Produces(StatusCodes.Status401Unauthorized);
 
+// ---------------------------------------------------------------------------
+// Dynamic AI catalog: which tables/views of the active source the AI can use.
+// Selection persists at Data/{sourceId}/ai-selection.json; PUT rewrites the
+// Restricted catalog.json (picked up without restart — the file provider
+// re-reads per call) and (re)generates the metadata store for the source.
+// The client polls GET /api/reveal/ai/metadata/status for progress.
+// ---------------------------------------------------------------------------
+
+// GET /ai/catalog — available objects + current AI selection for the active source.
+app.MapGet("/ai/catalog", (HttpContext http) =>
+{
+    try
+    {
+        var src = ResolveSource(http);
+        var available = AiCatalogService.ListObjects(src.SqlitePath)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var selected = aiCatalog.GetSelection(src.SourceId);
+        return Results.Ok(new { sourceId = src.SourceId, available, selected });
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error reading AI catalog: {ex.Message}");
+        return Results.Problem($"Error reading AI catalog: {ex.Message}");
+    }
+}).Produces(StatusCodes.Status200OK)
+  .ProducesProblem(StatusCodes.Status500InternalServerError);
+
+// PUT /ai/catalog — set the AI selection for the active source and regenerate metadata.
+app.MapPut("/ai/catalog", (AiCatalogUpdateRequest req, HttpContext http,
+    Reveal.Sdk.AI.AspNetCore.Services.IMetadataService metadataService,
+    SuggestedQuestionsService questions) =>
+{
+    try
+    {
+        var src = sourceRegistry.Resolve(
+            !string.IsNullOrWhiteSpace(req?.SourceId) ? req!.SourceId
+            : http.Request.Headers["X-DataSource"].FirstOrDefault());
+
+        if (metadataService.IsGenerationInProgress)
+            return Results.Conflict(new { message = "Metadata generation is already running — try again shortly." });
+
+        var validated = aiCatalog.SetSelection(src.SourceId, req?.Tables ?? new List<string>());
+
+        if (validated.Count == 0)
+        {
+            _ = Task.Run(async () =>
+            {
+                try { await metadataService.RemoveMetadataAsync(src.SourceId, null); }
+                catch (Exception ex) { Console.WriteLine($"[AI Catalog] metadata removal for '{src.SourceId}' FAILED: {ex}"); }
+            });
+        }
+        else
+        {
+            var whitelist = validated
+                .Select(t => new Reveal.Sdk.AI.Metadata.MetadataWhitelistItem
+                {
+                    Database = Path.GetFileNameWithoutExtension(src.SqlitePath),
+                    Table = t
+                })
+                .ToList();
+            // Fire-and-forget: regeneration removes-then-generates internally; the
+            // client polls /api/reveal/ai/metadata/status until Completed. Faults are
+            // logged — a bare discarded Task would swallow them silently.
+            _ = Task.Run(async () =>
+            {
+                try { await metadataService.RegenerateMetadataAsync(src.SourceId, null, whitelist, CancellationToken.None); }
+                catch (Exception ex) { Console.WriteLine($"[AI Catalog] metadata regeneration for '{src.SourceId}' FAILED: {ex}"); }
+            });
+        }
+
+        // The selection changed, so the cached starter questions are stale.
+        questions.Invalidate(src.SourceId);
+        _ = Task.Run(async () =>
+        {
+            try { await questions.RegenerateAsync(src.SourceId, CancellationToken.None); }
+            catch (Exception ex) { Console.WriteLine($"[Suggestions] regeneration for '{src.SourceId}' failed: {ex.Message}"); }
+        });
+
+        return Results.Accepted("/api/reveal/ai/metadata/status", new { sourceId = src.SourceId, selected = validated });
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error updating AI catalog: {ex.Message}");
+        return Results.Problem($"Error updating AI catalog: {ex.Message}");
+    }
+}).Produces(StatusCodes.Status202Accepted)
+  .Produces(StatusCodes.Status409Conflict)
+  .ProducesProblem(StatusCodes.Status500InternalServerError);
+
+// GET /ai/suggestions — per-source starter questions (LLM-generated, cached).
+app.MapGet("/ai/suggestions", async (HttpContext http, SuggestedQuestionsService questions, CancellationToken ct) =>
+{
+    try
+    {
+        var src = ResolveSource(http);
+        var result = await questions.GetAsync(src.SourceId, ct);
+        return Results.Ok(new
+        {
+            sourceId = src.SourceId,
+            questions = result.Questions,
+            generatedAt = result.GeneratedAt,
+            source = result.Source
+        });
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error getting suggestions: {ex.Message}");
+        return Results.Problem($"Error getting suggestions: {ex.Message}");
+    }
+}).Produces(StatusCodes.Status200OK)
+  .ProducesProblem(StatusCodes.Status500InternalServerError);
+
+// ---------------------------------------------------------------------------
+// Share links (#9): POST /share creates a GUID for a dashboard; GET /share/{guid}
+// (anonymous) exchanges it for a short-lived share JWT the public viewer uses for
+// Reveal data calls. The token carries scope=share + sourceId, and a middleware
+// below restricts share principals to read-style traffic.
+// ---------------------------------------------------------------------------
+
+// POST /share { dashboardName } — create a share link for a dashboard in the active source.
+app.MapPost("/share", (ShareRequest req, HttpContext http, ShareService shares) =>
+{
+    if (string.IsNullOrWhiteSpace(req?.DashboardName))
+        return Results.BadRequest(new { message = "A dashboardName is required." });
+
+    var src = ResolveSource(http);
+    var rdash = Path.Combine(src.DashboardsDir, req.DashboardName + ".rdash");
+    if (!File.Exists(rdash))
+        return Results.NotFound(new { message = $"Dashboard '{req.DashboardName}' was not found." });
+
+    var id = shares.Create(src.SourceId, req.DashboardName);
+    return Results.Ok(new { shareId = id, url = $"/share/{id}" });
+}).Produces(StatusCodes.Status200OK)
+  .Produces(StatusCodes.Status400BadRequest)
+  .Produces(StatusCodes.Status404NotFound);
+
+// GET /share/{guid} — anonymous: resolve the link and mint a share JWT.
+app.MapGet("/share/{guid:guid}", (Guid guid, ShareService shares, SourceRegistry reg, IConfiguration config) =>
+{
+    var entry = shares.Get(guid);
+    if (entry is null) return Results.NotFound(new { message = "This share link is invalid or has been revoked." });
+
+    var src = reg.Find(entry.SourceId);
+    var rdash = src is null ? null : Path.Combine(src.DashboardsDir, entry.DashboardName + ".rdash");
+    if (rdash is null || !File.Exists(rdash))
+        return Results.NotFound(new { message = "The shared dashboard no longer exists." });
+
+    // Share JWT: same key/issuer/audience as /auth/login so the existing bearer
+    // validation accepts it; scope=share is enforced by the middleware below, and
+    // the sourceId claim lets UserContextProvider resolve the right database.
+    var key = config["Auth:JwtKey"]!;
+    var hours = int.TryParse(config["Auth:ShareTokenHours"], out var h) ? h : 2;
+    var expires = DateTime.UtcNow.AddHours(hours);
+    var creds = new SigningCredentials(
+        new SymmetricSecurityKey(System.Text.Encoding.UTF8.GetBytes(key)),
+        SecurityAlgorithms.HmacSha256);
+    var token = new JwtSecurityToken(
+        issuer: config["Auth:Issuer"] ?? "RevealNorthwindDemo",
+        audience: config["Auth:Audience"] ?? "RevealNorthwindDemo",
+        claims: new[]
+        {
+            new Claim(JwtRegisteredClaimNames.Sub, $"share:{guid}"),
+            new Claim(ClaimTypes.Name, "share-viewer"),
+            new Claim("scope", "share"),
+            new Claim("sourceId", entry.SourceId),
+            new Claim("dashboardId", entry.DashboardName),
+            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+        },
+        expires: expires,
+        signingCredentials: creds);
+
+    return Results.Ok(new
+    {
+        dashboardName = entry.DashboardName,
+        sourceId = entry.SourceId,
+        shareToken = new JwtSecurityTokenHandler().WriteToken(token),
+        expiresAt = expires
+    });
+}).AllowAnonymous()
+  .Produces(StatusCodes.Status200OK)
+  .Produces(StatusCodes.Status404NotFound);
+
+// DELETE /share/{guid} — revoke a share link (authenticated).
+app.MapDelete("/share/{guid:guid}", (Guid guid, ShareService shares) =>
+    shares.Remove(guid) ? Results.Ok() : Results.NotFound())
+  .Produces(StatusCodes.Status200OK)
+  .Produces(StatusCodes.Status404NotFound);
+
+// GET /share/{guid}/analysis — anonymous: the per-viz breakdown for the shared dashboard.
+app.MapGet("/share/{guid:guid}/analysis", async (Guid guid, ShareService shares, DashboardAnalyzer analyzer, CancellationToken ct) =>
+{
+    var entry = shares.Get(guid);
+    if (entry is null) return Results.NotFound(new { message = "This share link is invalid or has been revoked." });
+    try
+    {
+        return Results.Ok(await analyzer.AnalyzeAsync(entry.SourceId, entry.DashboardName, ct));
+    }
+    catch (FileNotFoundException)
+    {
+        return Results.NotFound(new { message = "The shared dashboard no longer exists." });
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Analysis] {entry.DashboardName}: {ex.Message}");
+        return Results.Problem("Could not analyze the dashboard.");
+    }
+}).AllowAnonymous()
+  .Produces(StatusCodes.Status200OK)
+  .Produces(StatusCodes.Status404NotFound)
+  .ProducesProblem(StatusCodes.Status500InternalServerError);
+
+// GET /dashboards/{name}/analysis — same breakdown for authenticated users.
+app.MapGet("/dashboards/{name}/analysis", async (string name, HttpContext http, DashboardAnalyzer analyzer, CancellationToken ct) =>
+{
+    var src = ResolveSource(http);
+    try
+    {
+        return Results.Ok(await analyzer.AnalyzeAsync(src.SourceId, name, ct));
+    }
+    catch (FileNotFoundException)
+    {
+        return Results.NotFound();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Analysis] {name}: {ex.Message}");
+        return Results.Problem("Could not analyze the dashboard.");
+    }
+}).Produces(StatusCodes.Status200OK)
+  .Produces(StatusCodes.Status404NotFound)
+  .ProducesProblem(StatusCodes.Status500InternalServerError);
+
 app.UseHttpsRedirection();
 
 app.UseAuthentication();
 app.UseAuthorization();
+
+// Share-scope hardening: a share JWT satisfies the global auth policy, so restrict
+// share principals to read-style traffic — GET anywhere, plus the Reveal engine's
+// own POSTs under "/dashboard/..." (widget data etc.; note "/dashboards" app routes
+// are a DIFFERENT segment and stay blocked). Documented demo trade-off: a share
+// token can still read other dashboards within the same source.
+app.Use(async (context, next) =>
+{
+    if (context.User.HasClaim("scope", "share")
+        && !HttpMethods.IsGet(context.Request.Method)
+        && !HttpMethods.IsHead(context.Request.Method)
+        && !HttpMethods.IsOptions(context.Request.Method)
+        && !context.Request.Path.StartsWithSegments("/dashboard"))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        return;
+    }
+    await next();
+});
 
 app.MapControllers();
 
 app.Run();
 
 // ---------------------------------------------------------------------------
-// Helper: build a RevealAI.Engine ConnectionConfig for the SQLite database.
-// Type is Sqlite and Database carries the .sqlite file path. The compiled .rdash
-// uses the SQLite provider, which the server's DataSourceProvider resolves (it
-// injects the file path) — no credentials are involved.
+// Helper: build a RevealAI.Engine ConnectionConfig for a source's SQLite file.
+// The connection Id IS the sourceId, so the compiled .rdash embeds a datasource
+// that DataSourceProvider resolves straight back to the right .sqlite file
+// (rule 1 of its ResolvePath). No credentials are involved.
 // ---------------------------------------------------------------------------
-static ConnectionConfig BuildAiConnection(string databasePath) => new()
+static ConnectionConfig BuildAiConnection(string sourceId, string databasePath) => new()
 {
-    Id = "sqlServer",
-    Title = "SQLite Data Source",
+    Id = sourceId,
+    Title = $"{sourceId} (SQLite)",
     Type = ConnectionType.Sqlite,
     Database = databasePath
 };
+
+// ---------------------------------------------------------------------------
+// Helper: drop the cached {name}.analysis.json next to a dashboard file so a
+// save/delete invalidates the share-viewer breakdown immediately.
+// ---------------------------------------------------------------------------
+static void DeleteAnalysisCache(string rdashPath)
+{
+    try
+    {
+        var cache = Path.ChangeExtension(rdashPath, ".analysis.json");
+        if (File.Exists(cache)) File.Delete(cache);
+    }
+    catch { /* best-effort */ }
+}
 
 // ---------------------------------------------------------------------------
 // Helper: build a Microsoft.Data.Sqlite read-only connection string for a file.
@@ -855,32 +1138,64 @@ static string SqliteConnString(string dbPath) =>
     new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadOnly }.ConnectionString;
 
 // ---------------------------------------------------------------------------
-// Helper: read the column names for a specific set of tables/views (the catalog
-// whitelist) from the SQLite file. Used at startup to build the AI metadata
-// catalog with field metadata for exactly the whitelisted objects. PRAGMA
-// table_info works for both tables and views. The dictionary is pre-seeded with
-// the requested names (case-insensitive), so only those objects are retained.
+// Helper: one-time migration from the legacy flat layout to folder-per-source.
+//   Data/northwind.sqlite      -> Data/northwind/northwind.sqlite
+//   Dashboards/*.rdash         -> Dashboards/northwind/*.rdash
+// Also removes the stale AI metadata store written under the old catalog
+// datasource id ("NorthwindSql"); the catalog id is the sourceId ("northwind")
+// now, so the store regenerates under the new key on next startup.
+// Idempotent: every step checks before acting; a second run is a no-op.
 // ---------------------------------------------------------------------------
-static Dictionary<string, List<string>> DiscoverColumns(string dbPath, string[] names)
+static void MigrateLegacyLayout(string contentRoot)
 {
-    var columns = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-    if (names is null || names.Length == 0) return columns;
-    foreach (var n in names) columns[n] = new List<string>();
-
-    using var conn = new SqliteConnection(SqliteConnString(dbPath));
-    conn.Open();
-
-    foreach (var n in names)
+    try
     {
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"PRAGMA table_info(\"{n.Replace("\"", "\"\"")}\")";
-        using var r = cmd.ExecuteReader();
-        while (r.Read())
-            columns[n].Add(r.GetString(1)); // ordinal 1 = column name
-    }
+        var dataRoot = Path.Combine(contentRoot, "Data");
+        var dashRoot = Path.Combine(contentRoot, "Dashboards");
+        Directory.CreateDirectory(dataRoot);
+        Directory.CreateDirectory(dashRoot);
 
-    return columns;
+        var legacyDb = Path.Combine(dataRoot, "northwind.sqlite");
+        var northwindDir = Path.Combine(dataRoot, "northwind");
+        if (File.Exists(legacyDb) && !File.Exists(Path.Combine(northwindDir, "northwind.sqlite")))
+        {
+            Directory.CreateDirectory(northwindDir);
+            File.Move(legacyDb, Path.Combine(northwindDir, "northwind.sqlite"));
+            Console.WriteLine("[Migrate] Data/northwind.sqlite -> Data/northwind/northwind.sqlite");
+        }
+
+        var flatDashboards = Directory.GetFiles(dashRoot, "*.rdash", SearchOption.TopDirectoryOnly);
+        if (flatDashboards.Length > 0)
+        {
+            var northwindDash = Path.Combine(dashRoot, "northwind");
+            Directory.CreateDirectory(northwindDash);
+            foreach (var f in flatDashboards)
+            {
+                var target = Path.Combine(northwindDash, Path.GetFileName(f));
+                if (!File.Exists(target)) File.Move(f, target);
+            }
+            Console.WriteLine($"[Migrate] moved {flatDashboards.Length} dashboard(s) -> Dashboards/northwind/");
+        }
+
+        // Stale metadata store from the old "NorthwindSql" catalog id.
+        var metadataDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "reveal", "ai", "metadata");
+        if (Directory.Exists(metadataDir))
+        {
+            foreach (var f in Directory.GetFiles(metadataDir, "NorthwindSql_*"))
+            {
+                try { File.Delete(f); } catch { /* best-effort */ }
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Migrate] Legacy layout migration failed: {ex.Message}");
+    }
 }
+
+// (Catalog column discovery moved to AiCatalogService.DiscoverColumns.)
 
 // ---------------------------------------------------------------------------
 // Helper: persist a dashboard to disk as a valid .rdash file.
@@ -914,3 +1229,9 @@ record LoginRequest(string? Username, string? Password);
 // Body shapes for the AI visualization endpoints.
 record RecommendRequest(string Dataset, string? Guidance);
 record GenerateRequest(string Title, string Dataset, List<VisualizationSpec> Visualizations);
+
+// Body shape for PUT /ai/catalog.
+record AiCatalogUpdateRequest(string? SourceId, List<string> Tables);
+
+// Body shape for POST /share.
+record ShareRequest(string DashboardName);

@@ -21,6 +21,10 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.2.1" />
+    <!-- Excel workbook parsing for the upload→SQLite import (MIT; reads .xls + .xlsx). -->
+    <PackageReference Include="ExcelDataReader" Version="3.7.0" />
+    <!-- ExcelDataReader needs legacy code pages to read .xls files. -->
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="9.0.0" />
   </ItemGroup>
 
   <!-- Vendored copy of RevealAI.Engine 0.1.2 (the published NuGet is only 0.1.1,
@@ -37,19 +41,13 @@
 <ItemGroup>
   <None Include="Dashboards\**\*" CopyToOutputDirectory="Always" />
   <None Include="Images\**\*" CopyToOutputDirectory="Always" />
-  <!-- The SQLite database is the app's data source; ship it to the output/publish folder. -->
-  <None Include="Data\northwind.sqlite" CopyToOutputDirectory="PreserveNewest" />
+  <!-- Folder-per-source layout: every source's SQLite DB (+ workbook/selection files)
+       lives under Data/{sourceId}/ and ships to the output/publish folder. -->
+  <None Include="Data\**\*" CopyToOutputDirectory="PreserveNewest" />
 </ItemGroup>
 
 <ItemGroup>
   <None Include=".github\copilot-instructions.md" />
 </ItemGroup>
-
-<ItemGroup>
-  <None Update="Dashboards\Manufacturing.rdash">
-    <CopyToOutputDirectory>Never</CopyToOutputDirectory>
-  </None>
-</ItemGroup>
-
 
 </Project>

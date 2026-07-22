@@ -1,38 +1,44 @@
-using Microsoft.Extensions.Options;
 using Reveal.Sdk;
+using RevealSdk.Services;
 
 namespace RevealSdk.Sdk
 {
+    /// <summary>
+    /// Carries the ACTIVE DATA SOURCE with every Reveal request so the providers can
+    /// resolve per-source paths. Resolution order:
+    ///   1. X-DataSource header (set globally by the client fetch wrapper + Reveal headers)
+    ///   2. "sourceId" JWT claim (share tokens embed the shared dashboard's source)
+    ///   3. the default source ("northwind")
+    /// The old FilteredTables whitelist is gone: /connections browses everything and the
+    /// AI-only restriction lives in the metadata catalog (AiCatalogService).
+    /// </summary>
     public class UserContextProvider : IRVUserContextProvider
     {
-        private readonly SqliteOptions _sqliteOptions;
+        private readonly SourceRegistry _registry;
 
-        public UserContextProvider(IOptions<SqliteOptions> sqliteOptions)
+        public UserContextProvider(SourceRegistry registry)
         {
-            _sqliteOptions = sqliteOptions.Value;
+            _registry = registry;
         }
 
         IRVUserContext IRVUserContextProvider.GetUserContext(HttpContext aspnetContext)
         {
-            // The table whitelist that travels with the user context so DataSourceItemFilter
-            // can enforce it. This is the SAME set that backs Reveal/Metadata/catalog.json —
-            // both are built from Sqlite:CatalogObjects. SQLite has no schema, so table
-            // names are bare; we still carry a "dbo."-qualified alias in case an AI/catalog
-            // reference is schema-qualified. Empty when no whitelist is configured, which the
-            // filter treats as "allow everything".
-            var filteredTables = (_sqliteOptions.CatalogObjects ?? Array.Empty<string>())
-                .Where(n => !string.IsNullOrWhiteSpace(n))
-                .Select(n => n.Trim())
-                .SelectMany(n => new[] { n, $"dbo.{n}" })
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
+            // aspnetContext is NULL when the Reveal engine resolves a context outside an
+            // HTTP request — e.g. AI metadata generation triggered from a background task.
+            // Those flows carry the source via the datasource Id instead (see
+            // DataSourceProvider.ResolvePath rule 1), so the default here is harmless.
+            var requested = aspnetContext?.Request?.Headers["X-DataSource"].FirstOrDefault()
+                            ?? aspnetContext?.User?.FindFirst("sourceId")?.Value;
+
+            // Validate against the registry so a bogus header can't point at arbitrary paths.
+            var sourceId = _registry.Find(requested)?.SourceId ?? SourceRegistry.DefaultSourceId;
 
             var props = new Dictionary<string, object?>
             {
-                ["FilteredTables"] = filteredTables
+                ["SourceId"] = sourceId
             };
 
-            return new RVUserContext(null, props);
+            return new RVUserContext(aspnetContext?.User?.Identity?.Name, props);
         }
     }
 }
