@@ -1,0 +1,12 @@
+{
+  "GeneratedAt": "2026-07-22T00:44:16.8433053+00:00",
+  "Source": "llm",
+  "Questions": [
+    "What was the total sales amount last month?",
+    "Which salesperson had the highest total sales?",
+    "Show order trends by month for the past year.",
+    "List top 5 products by total quantity sold.",
+    "Break down sales by ShipCountry.",
+    "Which customers placed the most orders?"
+  ]
+}

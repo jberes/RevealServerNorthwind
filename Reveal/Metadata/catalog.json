@@ -220,56 +220,42 @@
                   "Name": "TotalCustomers"
                 }
               ]
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "Id": "salesdata",
-      "Provider": "SQLITE",
-      "Databases": [
-        {
-          "Name": "salesdata",
-          "DiscoveryMode": "Restricted",
-          "Tables": [
-            {
-              "Name": "Orders",
-              "Fields": [
-                {
-                  "Name": "OrderID"
-                },
-                {
-                  "Name": "Region"
-                },
-                {
-                  "Name": "OrderDate"
-                },
-                {
-                  "Name": "Amount"
-                },
-                {
-                  "Name": "Units"
-                },
-                {
-                  "Name": "PostalCode"
-                }
-              ]
             },
             {
-              "Name": "Sales_Reps",
+              "Name": "Alphabetical list of products",
               "Fields": [
                 {
-                  "Name": "RepName"
+                  "Name": "ProductID"
                 },
                 {
-                  "Name": "Region"
+                  "Name": "ProductName"
                 },
                 {
-                  "Name": "HireDate"
+                  "Name": "SupplierID"
                 },
                 {
-                  "Name": "Quota"
+                  "Name": "CategoryID"
+                },
+                {
+                  "Name": "QuantityPerUnit"
+                },
+                {
+                  "Name": "UnitPrice"
+                },
+                {
+                  "Name": "UnitsInStock"
+                },
+                {
+                  "Name": "UnitsOnOrder"
+                },
+                {
+                  "Name": "ReorderLevel"
+                },
+                {
+                  "Name": "Discontinued"
+                },
+                {
+                  "Name": "CategoryName"
                 }
               ]
             }

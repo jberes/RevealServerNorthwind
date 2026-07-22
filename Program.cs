@@ -628,6 +628,24 @@ app.MapGet("/sql/data/{name}", async (string name, int? top, HttpContext http) =
                 return Results.NotFound(new { message = $"Object '{name}' not found." });
         }
 
+        // Date/datetime columns are STORED as Unix-epoch seconds (required by
+        // Reveal's SQLite connector) — surface them as real dates in the preview.
+        // PRAGMA table_info gives the DECLARED types; anything date-ish is
+        // converted to an ISO string and reported as DateTime for the grid.
+        var dateColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var pragma = conn.CreateCommand())
+        {
+            pragma.CommandText = $"PRAGMA table_info(\"{name.Replace("\"", "\"\"")}\")";
+            await using var pr = await pragma.ExecuteReaderAsync();
+            while (await pr.ReadAsync())
+            {
+                var declared = pr.IsDBNull(2) ? "" : pr.GetString(2);
+                if (declared.Contains("date", StringComparison.OrdinalIgnoreCase) ||
+                    declared.Contains("time", StringComparison.OrdinalIgnoreCase))
+                    dateColumns.Add(pr.GetString(1));
+            }
+        }
+
         var limit = top is > 0 and <= 100000 ? top.Value : 1000;
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = $"SELECT * FROM \"{name.Replace("\"", "\"\"")}\" LIMIT {limit}";
@@ -635,14 +653,36 @@ app.MapGet("/sql/data/{name}", async (string name, int? top, HttpContext http) =
 
         var columns = new List<object>();
         for (int i = 0; i < reader.FieldCount; i++)
-            columns.Add(new { name = reader.GetName(i), type = reader.GetFieldType(i).Name });
+        {
+            var colName = reader.GetName(i);
+            columns.Add(new
+            {
+                name = colName,
+                type = dateColumns.Contains(colName) ? "DateTime" : reader.GetFieldType(i).Name
+            });
+        }
 
         var rows = new List<Dictionary<string, object?>>();
         while (await reader.ReadAsync())
         {
             var row = new Dictionary<string, object?>(reader.FieldCount);
             for (int i = 0; i < reader.FieldCount; i++)
-                row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+            {
+                var colName = reader.GetName(i);
+                if (reader.IsDBNull(i))
+                {
+                    row[colName] = null;
+                }
+                else if (dateColumns.Contains(colName) && reader.GetValue(i) is long epoch)
+                {
+                    row[colName] = DateTimeOffset.FromUnixTimeSeconds(epoch).UtcDateTime
+                        .ToString("yyyy-MM-ddTHH:mm:ss");
+                }
+                else
+                {
+                    row[colName] = reader.GetValue(i);
+                }
+            }
             rows.Add(row);
         }
 

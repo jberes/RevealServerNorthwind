@@ -2,6 +2,7 @@
   "Tables": [
     "All Invoices",
     "All Orders",
-    "EmployeeDetailsExtended"
+    "EmployeeDetailsExtended",
+    "Alphabetical list of products"
   ]
 }
