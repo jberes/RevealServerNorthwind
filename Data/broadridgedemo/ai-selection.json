@@ -1,0 +1,6 @@
+{
+  "Tables": [
+    "agg_asset_exposure",
+    "agg_asset_maturity_ladder"
+  ]
+}

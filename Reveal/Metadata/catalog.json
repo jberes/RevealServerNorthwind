@@ -1,6 +1,73 @@
 {
   "Datasources": [
     {
+      "Id": "broadridgedemo",
+      "Provider": "SQLSERVER",
+      "Databases": [
+        {
+          "Name": "BroadridgeDemo",
+          "DiscoveryMode": "Restricted",
+          "Tables": [
+            {
+              "Name": "dbo.agg_asset_exposure",
+              "Fields": [
+                {
+                  "Name": "assetid"
+                },
+                {
+                  "Name": "name"
+                },
+                {
+                  "Name": "ticker"
+                },
+                {
+                  "Name": "exchange"
+                },
+                {
+                  "Name": "classification"
+                },
+                {
+                  "Name": "currency"
+                },
+                {
+                  "Name": "price"
+                },
+                {
+                  "Name": "maturity"
+                },
+                {
+                  "Name": "holding_lines"
+                },
+                {
+                  "Name": "loan_count"
+                },
+                {
+                  "Name": "total_quantity"
+                },
+                {
+                  "Name": "total_marketvalue"
+                }
+              ]
+            },
+            {
+              "Name": "dbo.agg_asset_maturity_ladder",
+              "Fields": [
+                {
+                  "Name": "maturity_bucket"
+                },
+                {
+                  "Name": "asset_count"
+                },
+                {
+                  "Name": "total_exposure"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
       "Id": "marketing_data",
       "Provider": "SQLITE",
       "Databases": [

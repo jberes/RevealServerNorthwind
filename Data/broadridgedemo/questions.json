@@ -1,0 +1,12 @@
+{
+  "GeneratedAt": "2026-07-22T23:10:12.5634801+00:00",
+  "Source": "llm",
+  "Questions": [
+    "What is total exposure by classification?",
+    "Which assets have the highest total_marketvalue?",
+    "How many loans are there by exchange?",
+    "What is total_quantity by currency?",
+    "Show exposure across maturity buckets",
+    "Which tickers have the most holding_lines?"
+  ]
+}

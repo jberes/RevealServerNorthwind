@@ -1,19 +1,54 @@
 using System.Text.RegularExpressions;
+using Microsoft.Data.SqlClient;
 
 namespace RevealSdk.Services
 {
+    /// <summary>Connection settings for a config-defined SQL Server source.</summary>
+    public sealed record SqlServerSourceConfig(
+        string Host,
+        string Database,
+        string Username,
+        string Password,
+        string Schema,
+        bool TrustServerCertificate)
+    {
+        // Built via SqlConnectionStringBuilder so special characters in values
+        // (e.g. a password starting with '=') are quoted correctly.
+        public string ConnectionString => new SqlConnectionStringBuilder
+        {
+            DataSource = $"tcp:{Host},1433",
+            InitialCatalog = Database,
+            UserID = Username,
+            Password = Password,
+            Encrypt = true,
+            TrustServerCertificate = TrustServerCertificate,
+            ConnectTimeout = 30
+        }.ConnectionString;
+    }
+
     /// <summary>
-    /// A data source known to the app: one folder under Data/ containing a SQLite
-    /// database (and, for Excel-derived sources, the original workbook file).
+    /// A data source known to the app: either one folder under Data/ containing a
+    /// SQLite database (optionally Excel-derived), or a config-defined SQL Server
+    /// connection. Both get a Data/{sourceId}/ folder for per-source artifacts
+    /// (ai-selection.json, ai-metadata.json, questions.json) and a
+    /// Dashboards/{sourceId}/ folder.
     /// </summary>
     public sealed record SourceInfo(
         string SourceId,
-        string SqlitePath,
+        string? SqlitePath,
         string DashboardsDir,
-        string? WorkbookPath)
+        string? WorkbookPath,
+        SqlServerSourceConfig? SqlServer = null)
     {
-        /// <summary>"excel-derived" when the source was imported from a workbook.</summary>
-        public string Kind => WorkbookPath is null ? "sqlite" : "excel-derived";
+        public string Kind => SqlServer is not null ? "sqlserver"
+            : WorkbookPath is null ? "sqlite" : "excel-derived";
+
+        /// <summary>The logical database name (SQL Server db, or the sqlite file stem).</summary>
+        public string DatabaseName => SqlServer?.Database
+            ?? Path.GetFileNameWithoutExtension(SqlitePath!);
+
+        /// <summary>Folder for per-source artifacts (selection/metadata/questions files).</summary>
+        public string DataDir { get; init; } = "";
     }
 
     /// <summary>
@@ -31,11 +66,34 @@ namespace RevealSdk.Services
         private readonly string _dashboardsRoot;
         private readonly object _lock = new();
         private List<SourceInfo>? _sources;
+        // Config-defined SQL Server sources (registered once at startup; survive Refresh()).
+        private readonly List<SourceInfo> _sqlServerSources = new();
 
         public SourceRegistry(IWebHostEnvironment env)
         {
             _dataRoot = Path.Combine(env.ContentRootPath, "Data");
             _dashboardsRoot = Path.Combine(env.ContentRootPath, "Dashboards");
+        }
+
+        /// <summary>
+        /// Register a config-defined SQL Server source. Creates its Data/{id}/ and
+        /// Dashboards/{id}/ folders (for AI selection files and dashboards).
+        /// </summary>
+        public SourceInfo RegisterSqlServer(string sourceId, SqlServerSourceConfig config)
+        {
+            var id = Sanitize(sourceId).ToLowerInvariant();
+            var dataDir = Path.Combine(_dataRoot, id);
+            var dashDir = Path.Combine(_dashboardsRoot, id);
+            Directory.CreateDirectory(dataDir);
+            Directory.CreateDirectory(dashDir);
+            var src = new SourceInfo(id, null, dashDir, null, config) { DataDir = dataDir };
+            lock (_lock)
+            {
+                _sqlServerSources.RemoveAll(s => string.Equals(s.SourceId, id, StringComparison.OrdinalIgnoreCase));
+                _sqlServerSources.Add(src);
+                _sources = null;
+            }
+            return src;
         }
 
         public IReadOnlyList<SourceInfo> GetSources()
@@ -81,6 +139,9 @@ namespace RevealSdk.Services
         public void Delete(string sourceId, bool deleteDashboards)
         {
             var src = Find(sourceId) ?? throw new DirectoryNotFoundException($"Unknown source '{sourceId}'.");
+            if (src.SqlServer is not null)
+                throw new InvalidOperationException(
+                    $"'{src.SourceId}' is defined in appsettings — remove its configuration section instead.");
             var dataDir = Path.GetDirectoryName(src.SqlitePath)!;
             if (Directory.Exists(dataDir)) Directory.Delete(dataDir, recursive: true);
             if (deleteDashboards && Directory.Exists(src.DashboardsDir))
@@ -96,23 +157,28 @@ namespace RevealSdk.Services
         private List<SourceInfo> Scan()
         {
             var list = new List<SourceInfo>();
-            if (!Directory.Exists(_dataRoot)) return list;
-
-            foreach (var dir in Directory.GetDirectories(_dataRoot))
+            if (Directory.Exists(_dataRoot))
             {
-                var id = Path.GetFileName(dir);
-                // The canonical DB is {sourceId}.sqlite; tolerate any single .sqlite file.
-                var sqlite = File.Exists(Path.Combine(dir, id + ".sqlite"))
-                    ? Path.Combine(dir, id + ".sqlite")
-                    : Directory.GetFiles(dir, "*.sqlite").FirstOrDefault();
-                if (sqlite is null) continue;
+                foreach (var dir in Directory.GetDirectories(_dataRoot))
+                {
+                    var id = Path.GetFileName(dir);
+                    // Folders belonging to config-defined SQL Server sources carry no .sqlite.
+                    if (_sqlServerSources.Any(s => string.Equals(s.SourceId, id, StringComparison.OrdinalIgnoreCase)))
+                        continue;
+                    // The canonical DB is {sourceId}.sqlite; tolerate any single .sqlite file.
+                    var sqlite = File.Exists(Path.Combine(dir, id + ".sqlite"))
+                        ? Path.Combine(dir, id + ".sqlite")
+                        : Directory.GetFiles(dir, "*.sqlite").FirstOrDefault();
+                    if (sqlite is null) continue;
 
-                var workbook = Directory.GetFiles(dir, "*.xlsx").Concat(Directory.GetFiles(dir, "*.xls"))
-                    .FirstOrDefault();
-                var dashDir = Path.Combine(_dashboardsRoot, id);
-                Directory.CreateDirectory(dashDir);
-                list.Add(new SourceInfo(id, sqlite, dashDir, workbook));
+                    var workbook = Directory.GetFiles(dir, "*.xlsx").Concat(Directory.GetFiles(dir, "*.xls"))
+                        .FirstOrDefault();
+                    var dashDir = Path.Combine(_dashboardsRoot, id);
+                    Directory.CreateDirectory(dashDir);
+                    list.Add(new SourceInfo(id, sqlite, dashDir, workbook) { DataDir = dir });
+                }
             }
+            list.AddRange(_sqlServerSources);
             return list.OrderBy(s => s.SourceId, StringComparer.OrdinalIgnoreCase).ToList();
         }
 

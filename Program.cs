@@ -40,6 +40,38 @@ MigrateLegacyLayout(builder.Environment.ContentRootPath);
 var sourceRegistry = new SourceRegistry(builder.Environment);
 var aiCatalog = new AiCatalogService(sourceRegistry, builder.Environment);
 
+// ---- Config-defined SQL Server sources ----------------------------------
+// Convention: any top-level config section named "*SqlServer" with Host+Database
+// (e.g. "BroadridgeSqlServer") registers a SQL Server source. The source id is
+// the database name lowered ("BroadridgeDemo" -> "broadridgedemo"), so dashboards
+// live at Dashboards/broadridgedemo and AI artifacts at Data/broadridgedemo.
+// The bare legacy "SqlServer" section (pre-SQLite-migration Northwind) is skipped.
+foreach (var section in builder.Configuration.GetChildren())
+{
+    if (!section.Key.EndsWith("SqlServer", StringComparison.OrdinalIgnoreCase)) continue;
+    if (string.Equals(section.Key, "SqlServer", StringComparison.OrdinalIgnoreCase)) continue;
+
+    var host = section["Host"];
+    var database = section["Database"];
+    if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(database)) continue;
+
+    var cfg = new SqlServerSourceConfig(
+        host,
+        database,
+        section["Username"] ?? "",
+        section["Password"] ?? "",
+        string.IsNullOrWhiteSpace(section["Schema"]) ? "dbo" : section["Schema"]!,
+        bool.TryParse(section["TrustServerCertificate"], out var trust) && trust);
+
+    var registered = sourceRegistry.RegisterSqlServer(database, cfg);
+    Console.WriteLine($"[Sources] SQL Server source '{registered.SourceId}' registered from config section '{section.Key}' ({host}/{database}).");
+
+    // Seed its AI selection from the section's CatalogObjects (seed-only).
+    var sqlSeed = section.GetSection("CatalogObjects").Get<string[]>() ?? Array.Empty<string>();
+    if (sqlSeed.Length > 0)
+        aiCatalog.SeedSelectionIfMissing(registered.SourceId, sqlSeed);
+}
+
 // Seed northwind's AI selection from appsettings on first run (seed-only; the
 // selection file is the source of truth afterwards).
 var seedObjects = builder.Configuration.GetSection("Sqlite").Get<SqliteOptions>()?.CatalogObjects
@@ -53,14 +85,16 @@ var catalogPath = aiCatalog.CatalogPath;
 
 builder.Services.AddControllers().AddReveal(revealBuilder =>
 {
-    // SQLite is a local file and needs no credentials, so there is no
-    // authentication provider (the Azure SQL Server connection was removed).
+    // SQLite sources are local files (no credentials); config-defined SQL Server
+    // sources get their host from DataSourceProvider and their username/password
+    // from AuthenticationProvider.
     revealBuilder
         .AddDataSourceProvider<DataSourceProvider>()
         .AddDashboardProvider<DashboardProvider>()
         .AddObjectFilter<DataSourceItemFilter>()
         .AddUserContextProvider<UserContextProvider>()
-        .DataSources.RegisterSQLite();
+        .AddAuthenticationProvider<AuthenticationProvider>()
+        .DataSources.RegisterSQLite().RegisterMicrosoftSqlServer();
 
     revealBuilder
         .AddSettings(settings =>
@@ -356,7 +390,7 @@ app.MapGet("/sources", () =>
             int tables = 0;
             try
             {
-                tables = AiCatalogService.ListObjects(s.SqlitePath).Count;
+                tables = AiCatalogService.ListObjectsForSource(s).Count;
             }
             catch { /* unreadable DB — still list the source */ }
             var dashboards = Directory.Exists(s.DashboardsDir)
@@ -568,32 +602,48 @@ app.MapDelete("/dashboards/{name}", (string name, HttpContext http, ShareService
 app.MapGet("/sql/connection", (HttpContext http) =>
 {
     var src = ResolveSource(http);
-    return Results.Ok(new
-    {
-        sourceId = src.SourceId,
-        database = Path.GetFileName(src.SqlitePath),
-        path = src.SqlitePath,
-        provider = "SQLite"
-    });
+    return src.SqlServer is not null
+        ? Results.Ok(new
+        {
+            sourceId = src.SourceId,
+            database = src.SqlServer.Database,
+            host = src.SqlServer.Host,
+            schema = src.SqlServer.Schema,
+            provider = "SQL Server"
+        })
+        : Results.Ok(new
+        {
+            sourceId = src.SourceId,
+            database = Path.GetFileName(src.SqlitePath),
+            path = src.SqlitePath,
+            provider = "SQLite"
+        });
 });
 
 // GET /sql/objects — ALL tables and views in the active source. Deliberately
 // unfiltered: the AI whitelist (ai-selection.json → catalog.json) limits only
 // what the AI assistant can see, never what the Connections page can browse.
-app.MapGet("/sql/objects", async (HttpContext http) =>
+app.MapGet("/sql/objects", async (HttpContext http, CancellationToken ct) =>
 {
     try
     {
-        await using var conn = new SqliteConnection(SqliteConnString(ResolveSource(http).SqlitePath));
-        await conn.OpenAsync();
+        var src = ResolveSource(http);
+        if (src.SqlServer is not null)
+        {
+            var sqlObjects = await SqlServerCatalog.ListObjectsAsync(src.SqlServer, ct);
+            return Results.Ok(sqlObjects.Select(o => new { name = o.Name, type = o.Type }));
+        }
+
+        await using var conn = new SqliteConnection(SqliteConnString(src.SqlitePath!));
+        await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"SELECT name, type FROM sqlite_master
                             WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
                             ORDER BY name";
-        await using var reader = await cmd.ExecuteReaderAsync();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
 
         var objects = new List<object>();
-        while (await reader.ReadAsync())
+        while (await reader.ReadAsync(ct))
         {
             objects.Add(new
             {
@@ -601,22 +651,30 @@ app.MapGet("/sql/objects", async (HttpContext http) =>
                 type = reader.GetString(1) == "view" ? "view" : "table"
             });
         }
-        return Results.Ok(objects);
+        return Results.Ok<object>(objects);
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Error listing SQLite objects: {ex.Message}");
-        return Results.Problem($"Error listing SQLite objects: {ex.Message}");
+        Console.WriteLine($"Error listing objects: {ex.Message}");
+        return Results.Problem($"Error listing objects: {ex.Message}");
     }
 }).Produces(StatusCodes.Status200OK)
   .ProducesProblem(StatusCodes.Status500InternalServerError);
 
 // GET /sql/data/{name}?top=N — return rows + column metadata for a table/view
-app.MapGet("/sql/data/{name}", async (string name, int? top, HttpContext http) =>
+app.MapGet("/sql/data/{name}", async (string name, int? top, HttpContext http, CancellationToken ct) =>
 {
     try
     {
-        await using var conn = new SqliteConnection(SqliteConnString(ResolveSource(http).SqlitePath));
+        var src = ResolveSource(http);
+        if (src.SqlServer is not null)
+        {
+            var limitSql = top is > 0 and <= 100000 ? top.Value : 1000;
+            var (sqlCols, sqlRows) = await SqlServerCatalog.GetDataAsync(src.SqlServer, name, limitSql, ct);
+            return Results.Ok(new { name, columns = sqlCols, rowCount = sqlRows.Count, rows = sqlRows });
+        }
+
+        await using var conn = new SqliteConnection(SqliteConnString(src.SqlitePath!));
         await conn.OpenAsync();
 
         // Verify the object exists. This also guards the interpolated name below:
@@ -707,7 +765,11 @@ app.MapGet("/sql/rowcounts", async (HttpContext http, CancellationToken ct) =>
     var counts = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
     try
     {
-        await using var conn = new SqliteConnection(SqliteConnString(ResolveSource(http).SqlitePath));
+        var src = ResolveSource(http);
+        if (src.SqlServer is not null)
+            return Results.Ok(await SqlServerCatalog.RowCountsAsync(src.SqlServer, ct));
+
+        await using var conn = new SqliteConnection(SqliteConnString(src.SqlitePath!));
         await conn.OpenAsync(ct);
 
         var names = new List<string>();
@@ -782,7 +844,7 @@ app.MapPost("/ai/visualizations/recommend",
     try
     {
         var src = ResolveSource(http);
-        var conn = BuildAiConnection(src.SourceId, src.SqlitePath);
+        var conn = BuildAiConnection(src);
         var schema = await introspect.IntrospectAsync(conn, req.Dataset, 50, ct);
         var recs = await svc.RecommendAsync(schema,
             new RecommendationRequest { Guidance = ComposeGuidance(req.Guidance) }, ct);
@@ -816,7 +878,7 @@ app.MapPost("/ai/visualizations/generate",
     try
     {
         var src = ResolveSource(http);
-        var conn = BuildAiConnection(src.SourceId, src.SqlitePath);
+        var conn = BuildAiConnection(src);
         var schema = await introspect.IntrospectAsync(conn, req.Dataset, 50, ct);
         var spec = new DashboardSpec
         {
@@ -898,7 +960,7 @@ app.MapGet("/ai/catalog", (HttpContext http) =>
     try
     {
         var src = ResolveSource(http);
-        var available = AiCatalogService.ListObjects(src.SqlitePath)
+        var available = AiCatalogService.ListObjectsForSource(src)
             .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
             .ToList();
         var selected = aiCatalog.GetSelection(src.SourceId);
@@ -948,8 +1010,9 @@ app.MapPut("/ai/catalog", async (AiCatalogUpdateRequest req, HttpContext http,
             var whitelist = validated
                 .Select(t => new Reveal.Sdk.AI.Metadata.MetadataWhitelistItem
                 {
-                    Database = Path.GetFileNameWithoutExtension(src.SqlitePath),
-                    Table = t
+                    Database = src.DatabaseName,
+                    // SQL Server tables are schema-qualified in the engine's tree
+                    Table = AiCatalogService.QualifiedTableName(src, t)
                 })
                 .ToList();
             // Fire-and-forget: regeneration removes-then-generates internally; the
@@ -1002,7 +1065,7 @@ app.MapGet("/ai/metadata-overrides/{table}", (string table, HttpContext http) =>
         var src = ResolveSource(http);
         var all = aiCatalog.GetMetadataOverrides(src.SourceId);
         all.TryGetValue(table, out var meta);
-        var columns = AiCatalogService.DiscoverColumns(src.SqlitePath, new[] { table })
+        var columns = AiCatalogService.DiscoverColumnsForSource(src, new[] { table })
             .TryGetValue(table, out var cols) ? cols : new List<string>();
         return Results.Ok(new
         {
@@ -1031,7 +1094,7 @@ app.MapPut("/ai/metadata-overrides/{table}", async (string table, TableMetadata 
     try
     {
         var src = ResolveSource(http);
-        if (!AiCatalogService.ListObjects(src.SqlitePath).Contains(table))
+        if (!AiCatalogService.ListObjectsForSource(src).Contains(table))
             return Results.NotFound(new { message = $"Table '{table}' was not found in '{src.SourceId}'." });
 
         if (metadataService.IsGenerationInProgress)
@@ -1049,8 +1112,9 @@ app.MapPut("/ai/metadata-overrides/{table}", async (string table, TableMetadata 
             var whitelist = selection
                 .Select(t => new Reveal.Sdk.AI.Metadata.MetadataWhitelistItem
                 {
-                    Database = Path.GetFileNameWithoutExtension(src.SqlitePath),
-                    Table = t
+                    Database = src.DatabaseName,
+                    // SQL Server tables are schema-qualified in the engine's tree
+                    Table = AiCatalogService.QualifiedTableName(src, t)
                 })
                 .ToList();
             _ = Task.Run(async () =>
@@ -1257,13 +1321,25 @@ app.Run();
 // that DataSourceProvider resolves straight back to the right .sqlite file
 // (rule 1 of its ResolvePath). No credentials are involved.
 // ---------------------------------------------------------------------------
-static ConnectionConfig BuildAiConnection(string sourceId, string databasePath) => new()
-{
-    Id = sourceId,
-    Title = $"{sourceId} (SQLite)",
-    Type = ConnectionType.Sqlite,
-    Database = databasePath
-};
+static ConnectionConfig BuildAiConnection(SourceInfo src) => src.SqlServer is not null
+    ? new()
+    {
+        Id = src.SourceId,
+        Title = $"{src.SourceId} (SQL Server)",
+        Type = ConnectionType.SqlServer,
+        Host = src.SqlServer.Host,
+        Database = src.SqlServer.Database,
+        Schema = src.SqlServer.Schema,
+        Username = src.SqlServer.Username,
+        Password = src.SqlServer.Password
+    }
+    : new()
+    {
+        Id = src.SourceId,
+        Title = $"{src.SourceId} (SQLite)",
+        Type = ConnectionType.Sqlite,
+        Database = src.SqlitePath
+    };
 
 // ---------------------------------------------------------------------------
 // Helper: drop the cached {name}.analysis.json next to a dashboard file so a

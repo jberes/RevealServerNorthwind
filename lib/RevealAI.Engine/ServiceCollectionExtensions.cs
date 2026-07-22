@@ -54,6 +54,7 @@ public static class ServiceCollectionExtensions
 
         // Live schema introspection (add more ISchemaIntrospector implementations for other DBs).
         services.AddSingleton<Introspection.ISchemaIntrospector, Introspection.SqliteSchemaIntrospector>();
+        services.AddSingleton<Introspection.ISchemaIntrospector, Introspection.SqlServerSchemaIntrospector>();
         services.AddSingleton<Introspection.SchemaIntrospectionService>();
 
         services.AddHttpClient("RevealAI.Llm", c => c.Timeout = TimeSpan.FromSeconds(120));

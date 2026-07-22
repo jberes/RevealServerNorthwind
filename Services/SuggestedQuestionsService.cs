@@ -116,12 +116,23 @@ namespace RevealSdk.Services
         {
             var tables = _catalog.GetSelection(src.SourceId);
             if (tables.Count == 0)
-                tables = AiCatalogService.ListObjects(src.SqlitePath).ToList();
+                tables = AiCatalogService.ListObjectsForSource(src).ToList();
 
             var result = new List<TableSchema>();
             try
             {
-                using var conn = new SqliteConnection(AiCatalogService.ReadOnlyConnString(src.SqlitePath));
+                if (src.SqlServer is not null)
+                {
+                    var discovered = SqlServerCatalog
+                        .DiscoverColumnsAsync(src.SqlServer, tables.Take(10).ToArray())
+                        .GetAwaiter().GetResult();
+                    foreach (var t in tables.Take(10))
+                        if (discovered.TryGetValue(t, out var cols) && cols.Count > 0)
+                            result.Add(new TableSchema(t, cols.Select(c => (c.Name, c.Type)).ToList()));
+                    return result;
+                }
+
+                using var conn = new SqliteConnection(AiCatalogService.ReadOnlyConnString(src.SqlitePath!));
                 conn.Open();
                 foreach (var t in tables.Take(10)) // cap prompt size
                 {
@@ -217,7 +228,7 @@ namespace RevealSdk.Services
         // ---- cache -------------------------------------------------------------------
 
         private static string CachePath(SourceInfo src) =>
-            Path.Combine(Path.GetDirectoryName(src.SqlitePath)!, CacheFileName);
+            Path.Combine(src.DataDir, CacheFileName);
 
         private SuggestedQuestions? ReadCache(string sourceId)
         {

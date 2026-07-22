@@ -88,7 +88,7 @@ namespace RevealSdk.Services
             var src = _registry.Find(sourceId)
                       ?? throw new DirectoryNotFoundException($"Unknown source '{sourceId}'.");
 
-            var actual = ListObjects(src.SqlitePath);
+            var actual = ListObjectsForSource(src);
             var validated = tables
                 .Where(t => !string.IsNullOrWhiteSpace(t))
                 .Select(t => t.Trim())
@@ -182,7 +182,7 @@ namespace RevealSdk.Services
                     if (selection.Count == 0) continue;
 
                     Dictionary<string, List<string>> columns;
-                    try { columns = DiscoverColumns(src.SqlitePath, selection.ToArray()); }
+                    try { columns = DiscoverColumnsForSource(src, selection.ToArray()); }
                     catch (Exception ex)
                     {
                         Console.WriteLine($"[AI Catalog] {src.SourceId}: could not read columns: {ex.Message}");
@@ -197,19 +197,21 @@ namespace RevealSdk.Services
                     datasources.Add(new
                     {
                         Id = src.SourceId,
-                        Provider = "SQLITE",
+                        Provider = src.SqlServer is not null ? "SQLSERVER" : "SQLITE",
                         Databases = new object[]
                         {
                             new
                             {
-                                Name = Path.GetFileNameWithoutExtension(src.SqlitePath),
+                                Name = src.DatabaseName,
                                 DiscoveryMode = "Restricted",
                                 Tables = selection.Select(t =>
                                 {
                                     overrides.TryGetValue(t, out var tableMeta);
                                     return (object)new
                                     {
-                                        Name = t,
+                                        // SQL Server tables must be schema-qualified — the
+                                        // engine's table tree names them "dbo.X".
+                                        Name = QualifiedTableName(src, t),
                                         Description = string.IsNullOrWhiteSpace(tableMeta?.Description)
                                             ? null : tableMeta!.Description,
                                         Fields = (columns.TryGetValue(t, out var cols) ? cols : new List<string>())
@@ -241,6 +243,39 @@ namespace RevealSdk.Services
                     }));
                 Console.WriteLine($"[AI Catalog] catalog.json rebuilt: {datasources.Count} datasource(s).");
             }
+        }
+
+        /// <summary>
+        /// The name the Reveal engine's table tree uses for an object: schema-qualified
+        /// for SQL Server ("dbo.X"), bare for SQLite. Used in catalog.json Tables and
+        /// metadata whitelists — the UI/selection files always keep bare names.
+        /// </summary>
+        public static string QualifiedTableName(SourceInfo src, string table) =>
+            src.SqlServer is not null ? $"{src.SqlServer.Schema}.{table}" : table;
+
+        /// <summary>All table/view names for a source of either kind.</summary>
+        public static HashSet<string> ListObjectsForSource(SourceInfo src)
+        {
+            if (src.SqlServer is not null)
+            {
+                var objects = SqlServerCatalog.ListObjectsAsync(src.SqlServer).GetAwaiter().GetResult();
+                return new HashSet<string>(objects.Select(o => o.Name), StringComparer.OrdinalIgnoreCase);
+            }
+            return ListObjects(src.SqlitePath!);
+        }
+
+        /// <summary>Column names per table/view for a source of either kind.</summary>
+        public static Dictionary<string, List<string>> DiscoverColumnsForSource(SourceInfo src, string[] names)
+        {
+            if (src.SqlServer is not null)
+            {
+                var discovered = SqlServerCatalog.DiscoverColumnsAsync(src.SqlServer, names).GetAwaiter().GetResult();
+                return discovered.ToDictionary(
+                    kv => kv.Key,
+                    kv => kv.Value.Select(c => c.Name).ToList(),
+                    StringComparer.OrdinalIgnoreCase);
+            }
+            return DiscoverColumns(src.SqlitePath!, names);
         }
 
         /// <summary>All table/view names in a SQLite file (excluding sqlite_ internals).</summary>
@@ -281,9 +316,9 @@ namespace RevealSdk.Services
             new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadOnly }.ConnectionString;
 
         private static string SelectionPath(SourceInfo src) =>
-            Path.Combine(Path.GetDirectoryName(src.SqlitePath)!, SelectionFileName);
+            Path.Combine(src.DataDir, SelectionFileName);
 
         private static string MetadataPath(SourceInfo src) =>
-            Path.Combine(Path.GetDirectoryName(src.SqlitePath)!, MetadataFileName);
+            Path.Combine(src.DataDir, MetadataFileName);
     }
 }
