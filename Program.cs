@@ -1311,6 +1311,8 @@ app.Use(async (context, next) =>
     await next();
 });
 
+Microsoft.Playwright.Program.Main(new string[] { "install", "chromium", "--with-deps" });
+
 app.MapControllers();
 
 app.Run();
